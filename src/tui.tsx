@@ -13,19 +13,25 @@ type Item =
       readonly error: string
       readonly revertable: boolean
     }
+  | { readonly kind: "failed"; readonly id: string; readonly error: string }
 
-const items = (snapshot: WireSnapshot | undefined): Item[] =>
-  snapshot
-    ? [
-        ...snapshot.staged.map((staged) => ({ kind: "staged" as const, ...staged })),
-        ...snapshot.installed.map((installed) => ({ kind: "installed" as const, ...installed })),
-      ]
-    : []
+const items = (snapshot: WireSnapshot | undefined): Item[] => {
+  if (!snapshot) return []
+  const installed = snapshot.installed.map((item) => ({ kind: "installed" as const, ...item }))
+  // A failed plugin need not be one the kit installed: list every failure the host reports.
+  const failed = snapshot.failed
+    .filter((item) => !snapshot.installed.some((row) => row.id === item.label))
+    .map((item) => ({ kind: "failed" as const, id: item.label, error: item.error }))
+  return [...snapshot.staged.map((item) => ({ kind: "staged" as const, ...item })), ...installed, ...failed]
+}
 
-const label = (item: Item) =>
-  item.kind === "staged"
-    ? `staged     ${item.id}${item.installed ? " (installed)" : ""}`
-    : `installed  ${item.id} ${item.status}${item.error ? `: ${item.error}` : ""}`
+const first = (text: string) => text.split("\n")[0] ?? ""
+
+const label = (item: Item) => {
+  if (item.kind === "staged") return `staged     ${item.id}${item.installed ? " (installed)" : ""}`
+  if (item.kind === "failed") return `failed     ${item.id}: ${first(item.error)}`
+  return `installed  ${item.id} ${item.status}${item.error ? `: ${first(item.error)}` : ""}`
+}
 
 function Extensions() {
   const ctx = usePlugin()
@@ -53,11 +59,17 @@ function Extensions() {
   /** A confirm is a window, not a viewer: cap the diff and point at `o` for the rest. */
   const cap = (text: string) => (text.length > 1500 ? `${text.slice(0, 1500)}\n... (o shows the whole diff)` : text)
 
-  const act = async (run: (id: string) => Promise<WireReply>) => {
+  /** What the person agrees to: the diff for a staged copy, the state for an installed one. */
+  const act = async (verb: string, run: (id: string) => Promise<WireReply>) => {
     const item = selected()
     if (!item) return
-    const diff = (await server().diff({ id: item.id }, { location: location() })) as WireDiff
-    const ok = await confirm(`${item.kind === "staged" ? "Promote" : "Change"} ${item.id}?`, cap(diff.text), "Do it")
+    const detail =
+      item.kind === "staged"
+        ? cap(((await server().diff({ id: item.id }, { location: location() })) as WireDiff).text)
+        : item.kind === "installed"
+          ? `${item.id} is installed and ${item.status}.${item.error ? `\n\n${item.error}` : ""}`
+          : `${item.id} failed to load.\n\n${item.error}`
+    const ok = await confirm(`${verb} ${item.id}?`, detail, verb)
     if (!ok) return
     show(await run(item.id))
     await refresh()
@@ -91,28 +103,28 @@ function Extensions() {
         bind: "a",
         title: "Approve and install",
         enabled: staged,
-        run: () => void act((id) => server().approve({ id }, { location: location() }) as Promise<WireReply>),
+        run: () => void act("Install", (id) => server().approve({ id }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.reject`,
         bind: "x",
         title: "Reject and delete the staged copy",
         enabled: staged,
-        run: () => void act((id) => server().reject({ id }, { location: location() }) as Promise<WireReply>),
+        run: () => void act("Reject", (id) => server().reject({ id }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.remove`,
         bind: "d",
         title: "Remove the installed extension",
         enabled: () => installed(),
-        run: () => void act((id) => server().remove({ id }, { location: location() }) as Promise<WireReply>),
+        run: () => void act("Remove", (id) => server().remove({ id }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.revert`,
         bind: "v",
         title: "Go back to the saved version",
         enabled: () => installed(true),
-        run: () => void act((id) => server().revert({ id }, { location: location() }) as Promise<WireReply>),
+        run: () => void act("Revert", (id) => server().revert({ id }, { location: location() }) as Promise<WireReply>),
       },
       { id: `${page}.close`, bind: "q", title: "Close extensions", run: () => ctx.ui.router.navigate({ type: "home" }) },
     ],
