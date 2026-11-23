@@ -98,7 +98,7 @@ export function extensionTools(deps: ToolDeps): Info[] {
         return text(
           [
             `promoted ${id} (${promoted.files.join(", ")}), hash ${promoted.hash}`,
-            "opencode loads it now. Run ext_status to confirm it is active, or check whether it failed and why.",
+            "Run ext_status to confirm it is active. If it is not listed yet, opencode has not re-read the location: open /extensions once (that reloads it) or reload opencode.",
           ].join("\n"),
         )
       },
@@ -109,8 +109,7 @@ export function extensionTools(deps: ToolDeps): Info[] {
       input: object({ id: { type: "string" } }, ["id"]),
       execute: async (input, context) => {
         const id = assertId((input as { id: string }).id)
-        const summary = await kit.describe(id).catch(() => undefined)
-        await ask(deps, context, "ext.remove", [id], summary ? { summary } : {})
+        await ask(deps, context, "ext.remove", [id], {})
         const files = await kit.remove(id, "tool")
         return text(`removed ${id} (${files.length} files). Saved versions are kept for ext_revert if one exists.`)
       },

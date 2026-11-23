@@ -1,3 +1,4 @@
+import { mkdir } from "node:fs/promises"
 import path from "node:path"
 
 /** Extension ids name folders, so keep them to one safe path segment. */
@@ -24,6 +25,16 @@ export const historyRoot = (project: string, id: string) => path.join(stagingRoo
 
 /** On-disk copy of the kit's own skills, so their `path` is real. */
 export const skillsRoot = (project: string) => inProject(project, "ext-kit", "skills")
+
+/**
+ * Both folders must exist before anything is promoted: opencode watches the
+ * plugin folders it saw at startup, so a `plugins` folder created later by the
+ * first promote can be missed until a restart.
+ */
+export async function ensureFolders(project: string) {
+  await mkdir(stagingRoot(project), { recursive: true })
+  await mkdir(pluginsRoot(project), { recursive: true })
+}
 
 /** True when `target` is `root` or inside it; both may be relative to `project`. */
 export function isInside(root: string, target: string): boolean {

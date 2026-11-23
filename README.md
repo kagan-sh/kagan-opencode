@@ -9,7 +9,7 @@ Needs opencode v2 (`@opencode/plugin` 2.x).
 1. **Learn.** Four short skills teach the API: `ext-overview`, `ext-server`, `ext-tui`, `ext-safety`. They point at the real `.d.ts` files and docs instead of copying them.
 2. **Stage.** `ext_new { id, kind }` scaffolds `.opencode/staging/<id>`. Nothing there runs: discovery only reads `.opencode/plugins`.
 3. **Check.** `ext_check { id }` checks the folder shape, the id, the imports, and typechecks against the host's own `@opencode/plugin` types. It never runs the extension.
-4. **Promote.** `ext_promote { id }` shows the files, the contributions it could find (tools, hooks, files, network) and a diff, then asks you. Only then is it copied into `.opencode/plugins/<id>` and loaded.
+4. **Promote.** `ext_promote { id }` shows the files, the contributions it could find (tools, hooks, files, network) and a diff, then asks you. Only then is it copied into `.opencode/plugins/<id>`. opencode does not always notice a new folder there by itself, so the `/extensions` page reloads the location after every change.
 5. **See the result.** `ext_status` lists staged and installed extensions, and every plugin that failed with its error.
 6. **Undo.** `ext_remove` deletes an installed extension, `ext_revert` swaps it back to the version the last promote replaced. Both ask.
 

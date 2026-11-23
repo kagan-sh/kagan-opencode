@@ -52,7 +52,7 @@ export function audit(storage: StorageDomain): Audit {
     },
     recent: async (limit = 5) => {
       const { entries } = await storage.scan({ prefix, limit: 200 })
-      return entries
+      return [...entries]
         .sort((left, right) => right.key.localeCompare(left.key))
         .map((entry) => read(entry.value))
         .filter((event): event is AuditEvent => !!event)

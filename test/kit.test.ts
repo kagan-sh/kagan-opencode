@@ -166,7 +166,13 @@ test("ext_status shows staged, installed and failed plugins with the error", asy
 test("the audit trail keeps who promoted what, newest first", async () => {
   const dir = await project()
   const storage = memory()
-  const kit = createKit({ project: dir, plugins: async () => [], storage })
+  const changes: string[] = []
+  const kit = createKit({
+    project: dir,
+    plugins: async () => [],
+    storage,
+    onChange: async (change) => void changes.push(`${change.action} ${change.id}`),
+  })
   await scaffold(dir, "hello", "server")
   await kit.approve("hello", "tool")
   await kit.approve("hello", "tui")
@@ -174,6 +180,8 @@ test("the audit trail keeps who promoted what, newest first", async () => {
   expect(trail.audit.length).toBe(2)
   expect(trail.audit[0]!.via).toBe("tui")
   expect(trail.audit[0]!.hash.length).toBe(12)
+  // the TUI hears these and reloads the location
+  expect(changes).toEqual(["promote hello", "promote hello"])
 })
 
 test("symlinks are refused, not followed", async () => {

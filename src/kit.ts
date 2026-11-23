@@ -25,6 +25,11 @@ export interface KitDeps {
   readonly project: string
   readonly plugins: () => Promise<readonly PluginRow[]>
   readonly storage: StorageDomain
+  /**
+   * Told after every change. The server part cannot reload a location, but the
+   * TUI part can, so it hears this and reloads.
+   */
+  readonly onChange?: (change: { id: string; action: AuditEvent["action"] }) => Promise<void>
 }
 
 const directories = async (root: string) =>
@@ -34,6 +39,9 @@ const directories = async (root: string) =>
     .sort()
 
 const limit = 200
+
+/** A load error arrives with a full stack; the first lines have the message and the file. */
+const brief = (error: string) => error.split("\n").slice(0, 3).join("\n")
 
 export function createKit(deps: KitDeps) {
   const trail: Audit = audit(deps.storage)
@@ -55,7 +63,7 @@ export function createKit(deps: KitDeps) {
           return {
             id,
             status: row?.state.status ?? "unknown",
-            error: row?.state.status === "failed" ? row.state.error : "",
+            error: row?.state.status === "failed" ? brief(row.state.error) : "",
             revertable: (await history(project, id)).length > 0,
           }
         }),
@@ -64,7 +72,7 @@ export function createKit(deps: KitDeps) {
         .filter((row) => row.state.status === "failed")
         .map((row) => ({
           label: row.id ?? row.source.path ?? row.source.target ?? "unknown plugin",
-          error: row.state.status === "failed" ? row.state.error : "",
+          error: row.state.status === "failed" ? brief(row.state.error) : "",
         })),
       audit: await trail.recent(5),
     }
@@ -102,13 +110,18 @@ export function createKit(deps: KitDeps) {
     return rows.length > limit ? `${rows.slice(0, limit).join("\n")}\n... (truncated)` : text
   }
 
+  const record = async (event: AuditEvent) => {
+    await trail.record(event)
+    await deps.onChange?.({ id: event.id, action: event.action })
+  }
+
   const approve = async (id: string, via: AuditEvent["via"]) => {
     const inspection = await inspect(stagedDir(project, id), id)
     if (inspection.problems.length > 0)
       throw new Error(`refused: ${id} has problems\n${inspection.problems.map((problem) => `- ${problem}`).join("\n")}`)
 
     const promoted = await promote(project, id)
-    await trail.record({
+    await record({
       at: new Date().toISOString(),
       action: "promote",
       id,
@@ -122,18 +135,18 @@ export function createKit(deps: KitDeps) {
 
   const reject = async (id: string, via: AuditEvent["via"]) => {
     await rm(stagedDir(project, id), { recursive: true, force: true })
-    await trail.record({ at: new Date().toISOString(), action: "reject", id, hash: "", files: [], via, note: "staged copy deleted" })
+    await record({ at: new Date().toISOString(), action: "reject", id, hash: "", files: [], via, note: "staged copy deleted" })
   }
 
   const remove = async (id: string, via: AuditEvent["via"]) => {
     const files = await removeInstalled(project, id)
-    await trail.record({ at: new Date().toISOString(), action: "remove", id, hash: "", files: [...files], via, note: "" })
+    await record({ at: new Date().toISOString(), action: "remove", id, hash: "", files: [...files], via, note: "" })
     return files
   }
 
   const revert = async (id: string, via: AuditEvent["via"]) => {
     const restored = await revertInstalled(project, id)
-    await trail.record({
+    await record({
       at: new Date().toISOString(),
       action: "revert",
       id,

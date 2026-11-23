@@ -89,5 +89,14 @@ export const Kit = Rpc.define({
     remove: { input: one, output: reply },
     revert: { input: one, output: reply },
   },
-  events: {},
+  events: {
+    changed: {
+      schema: {
+        type: "object",
+        properties: { id: { type: "string" }, action: { type: "string" } },
+        required: ["id", "action"],
+        additionalProperties: false,
+      },
+    },
+  },
 })

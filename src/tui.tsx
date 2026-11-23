@@ -147,6 +147,13 @@ export default Plugin.define({
     void count()
     const stop = ctx.data.on("plugin.updated", () => void count())
 
+    // The server part can change files but cannot reload a location; this part can.
+    const stopChanges = ctx.client.rpc(Contract).events.on("changed", async (event) => {
+      if (event.location && event.location.directory !== location().directory) return
+      await ctx.client.location.reload().catch(() => undefined)
+      await count()
+    })
+
     const route = ctx.ui.router.register({ name: "extensions", render: () => <Extensions /> })
     const slot = ctx.ui.slot({
       append: "sidebar.footer",
@@ -174,6 +181,7 @@ export default Plugin.define({
 
     return () => {
       stop()
+      stopChanges()
       route()
       slot()
     }

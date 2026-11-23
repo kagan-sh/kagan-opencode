@@ -30,7 +30,7 @@ There is no package.json and no install step: opencode finds \`index.ts\` and \`
 1. \`ext_new { id, kind }\` writes \`.opencode/staging/<id>\`. **Nothing in staging ever runs.**
 2. Edit the files. Load \`ext-server\` for the server API and \`ext-tui\` for slots, routes and keys.
 3. \`ext_check { id }\`: shape and typecheck against the host's own types. Fix every problem.
-4. \`ext_promote { id }\`: asks the person to approve, then copies the folder into \`.opencode/plugins/<id>\`.
+4. \`ext_promote { id }\`: asks the person to approve, then copies the folder into \`.opencode/plugins/<id>\`. The \`/extensions\` page reloads opencode after a change; if you promoted from the tool and \`ext_status\` does not list it yet, open \`/extensions\` once or reload opencode.
 5. \`ext_status\`: which plugins are active or failed, with the error, and what changed recently.
 6. \`ext_remove\` / \`ext_revert\`: take it out, or go back to the version it replaced. Both ask.
 

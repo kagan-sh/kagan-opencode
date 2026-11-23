@@ -2,7 +2,7 @@ import { Plugin, Skill } from "@opencode/plugin"
 import path from "node:path"
 import { guard } from "./guard.ts"
 import { createKit } from "./kit.ts"
-import { assertId } from "./paths.ts"
+import { assertId, ensureFolders } from "./paths.ts"
 import { Kit as Contract, type WireReply } from "./rpc.ts"
 import { skills, writeSkills } from "./skills.ts"
 import { extensionTools } from "./tools.ts"
@@ -23,10 +23,14 @@ export default Plugin.define({
   id: "kagan.ext",
   async setup(ctx) {
     const project = ctx.location.directory
+    await ensureFolders(project)
+
+    let notify: ((change: { id: string; action: "promote" | "reject" | "remove" | "revert" }) => Promise<void>) | undefined
     const kit = createKit({
       project,
       plugins: async () => (await ctx.plugin.list()).data,
       storage: ctx.storage,
+      onChange: async (change) => notify?.(change),
     })
 
     await ctx.tool.transform((editor) => {
@@ -61,7 +65,7 @@ export default Plugin.define({
       }
     }
 
-    await ctx.rpc.register(Contract, {
+    const registration = await ctx.rpc.register(Contract, {
       snapshot: () => kit.snapshot(),
       diff: async (input) => ({ text: await kit.describe(idOf(input)) }),
       approve: async (input) => {
@@ -87,5 +91,9 @@ export default Plugin.define({
         return reply(async () => `reverted ${id} to ${(await kit.revert(id, "tui")).stamp}`)
       },
     })
+
+    notify = async (change) => {
+      await registration.events.emit("changed", change)
+    }
   },
 })
