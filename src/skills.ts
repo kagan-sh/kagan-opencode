@@ -30,13 +30,13 @@ There is no package.json and no install step: opencode finds \`index.ts\` and \`
 1. \`ext_new { id, kind }\` writes \`.opencode/staging/<id>\`. **Nothing in staging ever runs.** It also prints the type folders to read.
 2. Edit the files. Load \`ext-server\` for the server API and \`ext-tui\` for slots, routes and keys.
 3. \`ext_check { id }\`: shape, ids, imports, and a typecheck against the kit's pinned \`@opencode/plugin\` 2.3.2 types. Fix every problem.
-4. \`ext_promote { id }\`: shows the person every file with its size and hash and the whole diff, then installs exactly those bytes into \`.opencode/plugins/<id>\`. A change too large to show is refused: split the extension.
+4. \`ext_promote { id }\`: shows the person every file with its size and hash and the whole diff, then installs exactly those bytes into \`.opencode/plugins/<id>\`. Over 12,000 characters of staged text is refused: split the extension.
 5. \`ext_status\`: which plugins are active or failed, with the error, and what changed recently.
 6. \`ext_remove\` / \`ext_revert\`: take it out, or go back to the version it replaced. Both ask.
 
 If \`ext_status\` shows a failed extension, repair it in staging: edit the files, \`ext_check\` until it is clean, then \`ext_promote\` again. A promote replaces the installed copy and keeps the old one for \`ext_revert\`.
 
-After a promote, opencode may not have re-read \`.opencode/plugins\`. With the \`/extensions\` page open it reloads by itself; otherwise restart opencode.
+After a promote, opencode may not have re-read \`.opencode/plugins\`. A running terminal UI reloads by itself; otherwise restart opencode.
 
 ## Rules
 

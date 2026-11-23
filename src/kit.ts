@@ -41,6 +41,9 @@ const directories = async (root: string) =>
 /** The whole change must fit in the approval text: a cut diff hides code a person installs. */
 const shownLimit = 12_000
 
+/** Characters a person has to read: the staged text itself, not the diff against an old copy. */
+const stagedChars = (files: readonly FileInfo[]) => files.reduce((sum, file) => sum + (file.text?.length ?? 0), 0)
+
 /** A load error arrives with a full stack; the first lines have the message and the file. */
 const brief = (error: string) => error.split("\n").slice(0, 3).join("\n")
 
@@ -95,6 +98,15 @@ export function createKit(deps: KitDeps) {
     const inspection = await inspect(stagedDir(project, id), id)
     if (inspection.problems.length > 0) throw new Error(refusal(id, inspection.problems))
 
+    // Measured on the staged files, so the same staged bytes are judged the same
+    // whether or not an installed copy exists: a diff against an old copy repeats
+    // the old lines, and that is not what the person has to read.
+    const size = stagedChars(inspection.files)
+    if (size > shownLimit)
+      throw new Error(
+        `refused: ${id} cannot be shown in full: its ${inspection.files.length} staged files are ${size} characters, and a person must read all of them before approving (limit ${shownLimit}). Split the extension into smaller ones.`,
+      )
+
     const installed = await directories(pluginsRoot(project))
     const before = installed.includes(id) ? await inspect(installedDir(project, id), id).catch(() => undefined) : undefined
     const hash = await hashFiles(stagedDir(project, id), inspection.files.map((file) => file.path))
@@ -118,10 +130,6 @@ export function createKit(deps: KitDeps) {
     }
 
     const text = lines.filter((line, index) => line !== "" || lines[index - 1] !== "").join("\n")
-    if (text.length > shownLimit)
-      throw new Error(
-        `refused: ${id} cannot be shown in full: the whole change is ${text.length} characters, and a person must see all of it before approving (limit ${shownLimit}). Split the extension into smaller ones.`,
-      )
     return { text, hash }
   }
 

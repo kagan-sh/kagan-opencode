@@ -1,37 +1,9 @@
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { For, Show, createSignal, onCleanup } from "solid-js"
+import { can, items, label, type Verb } from "./page.ts"
 import { Kit as Contract, type WireDiff, type WireReply, type WireSnapshot } from "./rpc.ts"
 
 const page = "kagan.ext.page"
-
-type Item =
-  | { readonly kind: "staged"; readonly id: string; readonly installed: boolean }
-  | {
-      readonly kind: "installed"
-      readonly id: string
-      readonly status: string
-      readonly error: string
-      readonly revertable: boolean
-    }
-  | { readonly kind: "failed"; readonly id: string; readonly error: string }
-
-const items = (snapshot: WireSnapshot | undefined): Item[] => {
-  if (!snapshot) return []
-  const installed = snapshot.installed.map((item) => ({ kind: "installed" as const, ...item }))
-  // A failed plugin need not be one the kit installed: list every failure the host reports.
-  const failed = snapshot.failed
-    .filter((item) => !snapshot.installed.some((row) => row.id === item.label))
-    .map((item) => ({ kind: "failed" as const, id: item.label, error: item.error }))
-  return [...snapshot.staged.map((item) => ({ kind: "staged" as const, ...item })), ...installed, ...failed]
-}
-
-const first = (text: string) => text.split("\n")[0] ?? ""
-
-const label = (item: Item) => {
-  if (item.kind === "staged") return `staged     ${item.id}${item.installed ? " (installed)" : ""}`
-  if (item.kind === "failed") return `failed     ${item.id}: ${first(item.error)}`
-  return `installed  ${item.id} ${item.status}${item.error ? `: ${first(item.error)}` : ""}`
-}
 
 /** What the page is showing instead of the list: the whole diff to read, and optionally to approve. */
 interface Review {
@@ -73,26 +45,29 @@ function Extensions() {
   /**
    * A staged copy is read in full, in a view that scrolls, before anyone can
    * approve it. The install carries the hash of exactly the text on screen.
+   * Every other action only needs a yes: rejecting reads nothing.
    */
-  const act = async (verb: string, install: (id: string, hash: string) => Promise<WireReply>) => {
+  const act = async (verb: string, perform: (id: string, hash: string) => Promise<WireReply>) => {
     const item = selected()
     if (!item) return
     try {
-      if (item.kind === "staged") {
+      if (item.kind === "staged" && verb === "Install") {
         const diff = (await server().diff({ id: item.id }, { location: location() })) as WireDiff
         setReview({
           title: `${verb} ${item.id}?  hash ${diff.hash}`,
           text: diff.text,
-          ...(verb === "Install" ? { install: () => install(item.id, diff.hash) } : {}),
+          install: () => perform(item.id, diff.hash),
         })
         return
       }
       const detail =
-        item.kind === "installed"
-          ? `${item.id} is installed and ${item.status}.${item.error ? `\n\n${item.error}` : ""}`
-          : `${item.id} failed to load.\n\n${item.error}`
+        item.kind === "staged"
+          ? `${item.id} is staged and has not run. Rejecting deletes the staged copy; an installed version, if any, stays.`
+          : item.kind === "installed"
+            ? `${item.id} is installed and ${item.status}.${item.error ? `\n\n${item.error}` : ""}`
+            : `${item.id} failed to load.\n\n${item.error}`
       if (!(await confirm(`${verb} ${item.id}?`, detail, verb))) return
-      show(await install(item.id, ""))
+      show(await perform(item.id, ""))
     } catch (error) {
       fail(error)
     }
@@ -124,12 +99,8 @@ function Extensions() {
   const stop = ctx.data.on("plugin.updated", () => void refresh())
   onCleanup(stop)
 
-  const staged = () => selected()?.kind === "staged"
-  const installed = (onlyRevertable = false) => {
-    const item = selected()
-    return item?.kind === "installed" && (!onlyRevertable || item.revertable)
-  }
   const listing = () => review() === undefined
+  const acts = (verb: Verb) => listing() && can(verb, selected())
 
   ctx.keymap.layer(() => ({
     mode: "global",
@@ -140,33 +111,33 @@ function Extensions() {
       { id: `${page}.down`, bind: "down", enabled: listing, run: () => move(1) },
       { id: `${page}.up.k`, bind: "k", enabled: listing, run: () => move(-1) },
       { id: `${page}.down.j`, bind: "j", enabled: listing, run: () => move(1) },
-      { id: `${page}.diff`, bind: "o", title: "Show the diff", enabled: () => listing() && !!selected(), run: () => void read(selected()!.id) },
+      { id: `${page}.diff`, bind: "o", title: "Show the diff", enabled: () => acts("diff"), run: () => void read(selected()!.id) },
       {
         id: `${page}.approve`,
         bind: "a",
         title: "Approve and install",
-        enabled: () => listing() && staged(),
+        enabled: () => acts("approve"),
         run: () => void act("Install", (id, hash) => server().approve({ id, hash }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.reject`,
         bind: "x",
         title: "Reject and delete the staged copy",
-        enabled: () => listing() && staged(),
+        enabled: () => acts("reject"),
         run: () => void act("Reject", (id) => server().reject({ id }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.remove`,
         bind: "d",
         title: "Remove the installed extension",
-        enabled: () => listing() && !!installed(),
+        enabled: () => acts("remove"),
         run: () => void act("Remove", (id) => server().remove({ id }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.revert`,
         bind: "v",
         title: "Go back to the saved version",
-        enabled: () => listing() && installed(true),
+        enabled: () => acts("revert"),
         run: () => void act("Revert", (id) => server().revert({ id }, { location: location() }) as Promise<WireReply>),
       },
       { id: `${page}.close`, bind: "q", title: "Close extensions", enabled: listing, run: () => ctx.ui.router.navigate({ type: "home" }) },

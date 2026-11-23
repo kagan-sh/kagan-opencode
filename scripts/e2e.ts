@@ -7,13 +7,16 @@
  * passes ext_check; the approval RPC installs the exact hashed content; a
  * changed hash is refused; opencode loads both a server and a TUI extension; a
  * failing extension shows up in ctx.plugin.list with its error; the real
- * permission path asks and a real rejection installs nothing; ext_status
- * reports both.
+ * permission path asks and a real rejection installs nothing; the page rejects
+ * a staged copy from the keyboard; the audit trail reads back after the
+ * reloads; ext_status reports both.
  *
  * What it cannot prove: the agent side of the loop needs a model, so the agent
- * tools are called directly here instead of through a session. The permission
- * step drives the same server endpoint `ctx.permission.assert` uses; the
- * wrapper itself is the host's.
+ * tools are called directly here instead of through a session; the tools run
+ * with their own storage, so the RPC's audit events reach the host's trail (read
+ * here) and the tools' own reach ext_status. The permission step drives the
+ * same server endpoint `ctx.permission.assert` uses; the wrapper itself is the
+ * host's.
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { spawn } from "node:child_process"
@@ -48,7 +51,13 @@ const memory = (): StorageDomain => {
   } as StorageDomain
 }
 
-/** The agent's tools, wired to a person who always says yes, as tests do. */
+/**
+ * The agent's tools, wired to a person who always says yes, as tests do. This
+ * kit keeps its audit in memory, so it sees only the promotes it made itself:
+ * in a real session one `ctx.storage` serves the tools and the RPC, and
+ * `ext_status` shows both trails. The e2e reads the host's trail over the
+ * snapshot RPC for the RPC side.
+ */
 function agent(project: string, plugins: () => Promise<readonly PluginRow[]>, allow = true) {
   const asked: string[] = []
   const kit = createKit({ project, plugins, storage: memory() })
@@ -313,6 +322,10 @@ step("the /extensions page in a real terminal (tmux, no model)")
 const tui = await proofOfPage({ project, env })
 say("--- /extensions ---")
 say(tui.capture)
+say("--- after x on the staged drift row ---")
+say(tui.ask)
+say(`staged drift after the TUI reject: ${(await readdir(stagedDir(project, "drift")).catch(() => [])).length ? "still there" : "gone"}`)
+check(!(await readdir(stagedDir(project, "drift")).catch(() => [])).length, "the TUI's reject did not delete the staged copy")
 if (tui.prompt) {
   say("--- after q, typed jkaq ---")
   say(tui.prompt.split("\n").filter((line) => line.includes("jkaq") || line.includes("Build")).join("\n"))
@@ -326,6 +339,12 @@ check(!(await readdir(path.join(project, ".opencode", "plugins"))).includes("sad
 const rejected = await server(base).rpc(project, "kagan.ext", "reject", { id: "sad" })
 say(`reject sad -> ${JSON.stringify(rejected)}`)
 check(!(await readdir(stagedDir(project, "sad")).catch(() => [])).length, "the staged copy survived the reject")
+
+step("the host's audit trail reads back after the reloads")
+const host = (await server(base).rpc(project, "kagan.ext", "snapshot", {})) as { audit: { action: string; id: string; via: string }[] }
+say(`host audit (newest first): ${host.audit.map((event) => `${event.action} ${event.id} via ${event.via}`).join("; ")}`)
+check(host.audit.some((event) => event.action === "promote" && event.via === "rpc"), "the host's audit does not show the RPC promotes")
+check(host.audit.some((event) => event.action === "reject" && event.id === "drift" && event.via === "rpc"), "the TUI's reject is not in the host's audit")
 
 step("the agent's own promote asks the person, and a refusal installs nothing")
 const refusing = agent(project, () => server(base).plugins(project), false)
@@ -345,6 +364,11 @@ const touched = await waitFor("touched to load", async () => {
 })
 say(`touched is ${touched.find((row) => row.id === "touched")!.state.status}`)
 
+step("ext_status shows the trail for the promotes it made itself")
+const trail = await call("ext_status")
+say(trail.split("\n").filter((line) => line.startsWith("recent") || line.startsWith("  ")).join("\n"))
+check(trail.includes("promote touched via tool"), "ext_status does not show the agent's own promote")
+
 step("what this run saw")
 say(`- the kit loaded in a real opencode v2.3.2 server (${rows.length} plugins listed, server + tui + rpc features)`)
 say("- staging stayed invisible to the loader")
@@ -353,6 +377,8 @@ say("- a promoted TUI extension loaded with features.tui")
 say("- a throwing extension was reported failed with its error, and ext_status carried it to the agent")
 say(`- a real permission evaluation for ext.promote asked (effect) and a real reject left nothing installed`)
 say("- the /extensions page rendered in a real terminal, listed the failed extension, and gave the keys back to the prompt")
+say("- x on a staged row asked, then deleted the staged copy in a real terminal")
+say("- the host's snapshot carried the audit trail (RPC promote, reject) after the reloads; ext_status carried the tool promote")
 say(`- the agent's own ext_promote asked first ("${asked.join("; ")}") and a refusal left nothing installed`)
 
 stop()
@@ -366,7 +392,7 @@ else await rm(root, { recursive: true, force: true })
  */
 async function proofOfPage(input: { project: string; env: Record<string, string | undefined> }) {
   const has = await Bun.spawn(["tmux", "-V"], { stdout: "ignore", stderr: "ignore" }).exited
-  if (has !== 0) return { capture: "(tmux is not installed; the page was not driven)" }
+  if (has !== 0) return { capture: "(tmux is not installed; the page was not driven)", ask: "", prompt: "" }
 
   const name = `kagan-e2e-${port}`
   const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`
@@ -400,6 +426,18 @@ async function proofOfPage(input: { project: string; env: Record<string, string 
     check(/sad failed:/.test(page), "the /extensions page does not show the failed extension:\n" + page)
     check(page.includes("installed  hello active"), "the /extensions page does not show the loaded extension:\n" + page)
 
+    // `x` on the staged `drift` row must ask, then delete it: it must not open the read-only diff.
+    await run("send-keys", "-t", name, "j")
+    await Bun.sleep(500)
+    await run("send-keys", "-t", name, "x")
+    await Bun.sleep(1_500)
+    const ask = await capture()
+    check(/Reject drift\?/.test(ask), "x did not ask to reject the staged copy:\n" + ask)
+    await run("send-keys", "-t", name, "Enter")
+    await Bun.sleep(3_000)
+    const after = await capture()
+    check(!/^staged\s+drift\b/m.test(after), "the rejected row is still listed:\n" + after)
+
     // `q` closes the page; every letter after it must reach the prompt.
     await run("send-keys", "-t", name, "q")
     await Bun.sleep(1_500)
@@ -407,7 +445,7 @@ async function proofOfPage(input: { project: string; env: Record<string, string 
     await Bun.sleep(1_500)
     const prompt = await capture()
     check(prompt.includes("jkaq"), "the page's keys are still swallowing the prompt:\n" + prompt)
-    return { capture: page, prompt }
+    return { capture: page, ask, prompt }
   } finally {
     await run("kill-session", "-t", name)
   }

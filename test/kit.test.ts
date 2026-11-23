@@ -160,6 +160,19 @@ test("a change too large to show is refused, not cut", async () => {
   await expect(kit.describe("big")).rejects.toThrow("cannot be shown in full")
 })
 
+test("the size limit measures the staged text, not the diff against the installed copy", async () => {
+  const dir = await project()
+  const { kit } = tools(dir)
+  await scaffold(dir, "hello", "server")
+  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), index("hello", `// ${"a".repeat(7_000)}`))
+  await kit.approve("hello", (await kit.describe("hello")).hash, "tool")
+  // Both versions are under the limit; the diff between them repeats both, so it is not.
+  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), index("hello", `// ${"b".repeat(7_000)}`))
+
+  const shown = await kit.describe("hello")
+  expect(shown.text.length).toBeGreaterThan(12_000)
+})
+
 test("approve refuses code that ext_check rejects", async () => {
   const dir = await project()
   const { kit } = tools(dir)
@@ -203,6 +216,24 @@ test("the person is asked for ext.promote with the content hash, and nothing is 
   expect(asked).toEqual([{ action: "ext.promote", resources: [`hello@${hash}`], save: [] }])
   expect(await readdir(path.join(dir, ".opencode", "plugins")).catch(() => [])).toEqual([])
   expect(await readdir(stagedDir(dir, "hello"))).toContain("index.ts")
+})
+
+test("an edit while the person decides is refused, and the edited content never installs", async () => {
+  const dir = await project()
+  const kit = createKit({ project: dir, plugins: async () => [], storage: memory() })
+  const file = path.join(stagedDir(dir, "hello"), "index.ts")
+  // The fake ask edits staging, as another process could while the dialog is open.
+  const permission = {
+    assert: async () => {
+      await writeFile(file, index("hello", "// edited while the person was deciding\n"))
+    },
+  } as unknown as Pick<PermissionDomain, "assert">
+  const promote = new Map(extensionTools({ kit, project: dir, permission }).map((tool) => [tool.name, tool])).get("ext_promote")!
+  await scaffold(dir, "hello", "server")
+
+  await expect(promote.execute({ id: "hello" }, context())).rejects.toThrow("changed since it was shown")
+  expect(await readdir(path.join(dir, ".opencode", "plugins")).catch(() => [])).toEqual([])
+  expect(await readFile(file, "utf8")).toContain("deciding")
 })
 
 test("ext_remove and ext_revert ask too", async () => {

@@ -112,7 +112,7 @@ export function extensionTools(deps: ToolDeps): Info[] {
         return text(
           [
             `promoted ${id} (${promoted.files.join(", ")}), hash ${promoted.hash}`,
-            "Run ext_status to confirm it is active. If it is not listed yet, restart opencode: only an open /extensions page reloads the location by itself.",
+            "Run ext_status to confirm it is active. A running terminal UI reloads by itself; otherwise restart opencode.",
           ].join("\n"),
         )
       },
