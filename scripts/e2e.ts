@@ -436,7 +436,8 @@ async function proofOfPage(input: { project: string; env: Record<string, string 
     await run("send-keys", "-t", name, "Enter")
     await Bun.sleep(3_000)
     const after = await capture()
-    check(!/^staged\s+drift\b/m.test(after), "the rejected row is still listed:\n" + after)
+    check(!(await readdir(stagedDir(input.project, "drift")).catch(() => [])).length, "x only opened a view; the staged copy is still there")
+    check(/^staged\s+asked/m.test(after) && !/^staged\s+drift\b/m.test(after), "the page did not return to the list without the rejected row:\n" + after)
 
     // `q` closes the page; every letter after it must reach the prompt.
     await run("send-keys", "-t", name, "q")
