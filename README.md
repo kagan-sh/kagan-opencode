@@ -59,7 +59,7 @@ bunx oxlint src test scripts
 bun run e2e           # real opencode in a throwaway project with its own config dir
 ```
 
-The kit creates `.opencode/staging/` and `.opencode/ext-kit/` on first use. If you keep `.opencode` in git, ignore the scratch folders: `.opencode/staging/.tmp/` and `.opencode/staging/.history/`.
+At setup the kit makes `.opencode/plugins/` (opencode only watches the plugin folders it saw at startup) and `.opencode/ext-kit/skills/` (each registered skill points at a real file). `.opencode/staging/` appears on first use. If you keep `.opencode` in git, ignore the scratch folders: `.opencode/staging/` (including `.tmp/` and `.history/`) and `.opencode/ext-kit/`.
 
 ## License
 

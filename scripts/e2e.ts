@@ -4,11 +4,16 @@
  * state dirs, so the person's real opencode is never touched.
  *
  * What it proves: the kit loads in a real opencode server; a staged extension
- * passes ext_check; the approval RPC installs it; opencode loads it; a failing
- * extension shows up in ctx.plugin.list with its error; ext_status reports both.
+ * passes ext_check; the approval RPC installs the exact hashed content; a
+ * changed hash is refused; opencode loads both a server and a TUI extension; a
+ * failing extension shows up in ctx.plugin.list with its error; the real
+ * permission path asks and a real rejection installs nothing; ext_status
+ * reports both.
  *
  * What it cannot prove: the agent side of the loop needs a model, so the agent
- * tools are called directly here instead of through a session.
+ * tools are called directly here instead of through a session. The permission
+ * step drives the same server endpoint `ctx.permission.assert` uses; the
+ * wrapper itself is the host's.
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { spawn } from "node:child_process"
@@ -83,37 +88,72 @@ let password = ""
 const auth = (): Record<string, string> =>
   password ? { authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` } : {}
 
-const server = (base: string) => ({
-  plugins: async (location: string): Promise<PluginRow[]> => {
-    const response = await fetch(`${base}/api/plugin?${where(location)}`, { headers: auth() })
-    check(response.ok, `plugin list failed: ${response.status}`)
-    return ((await response.json()) as { data: PluginRow[] }).data
-  },
-  /** What the TUI part does when its `changed` event arrives: ask the server to re-read the location. */
-  reload: async (location: string) => {
-    const response = await fetch(`${base}/api/location/reload`, { method: "POST", headers: auth() })
-    check(response.status === 204, `location reload failed: ${response.status}`)
-    // The kit is torn down and registered again, so its RPC is briefly unavailable.
-    await waitFor("the kit's RPC after a reload", async () => {
-      const probe = await fetch(`${base}/api/rpc/kagan.ext/snapshot?${where(location)}`, {
+const server = (base: string) => {
+  const request = async <T>(method: string, url: string, body?: unknown): Promise<T> => {
+    const response = await fetch(url, {
+      method,
+      headers: { "content-type": "application/json", ...auth() },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    if (!response.ok) throw new Error(`${method} ${url} failed: ${response.status} ${await response.text().catch(() => "")}`)
+    return (await response.json().catch(() => ({}))) as T
+  }
+
+  return {
+    plugins: async (location: string): Promise<PluginRow[]> => (await request<{ data: PluginRow[] }>("GET", `${base}/api/plugin?${where(location)}`)).data,
+    /** What the TUI part does when its `changed` event arrives: ask the server to re-read the location. */
+    reload: async (location: string) => {
+      const response = await fetch(`${base}/api/location/reload`, { method: "POST", headers: auth() })
+      check(response.status === 204, `location reload failed: ${response.status}`)
+      // The kit is torn down and registered again, so its RPC is briefly unavailable.
+      await waitFor("the kit's RPC after a reload", async () => {
+        const probe = await fetch(`${base}/api/rpc/kagan.ext/snapshot?${where(location)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...auth() },
+          body: JSON.stringify({ input: {} }),
+        })
+        return probe.ok ? true : undefined
+      })
+    },
+    rpc: async (location: string, rpcID: string, method: string, input: unknown) => {
+      const response = await fetch(`${base}/api/rpc/${encodeURIComponent(rpcID)}/${encodeURIComponent(method)}?${where(location)}`, {
         method: "POST",
         headers: { "content-type": "application/json", ...auth() },
-        body: JSON.stringify({ input: {} }),
+        body: JSON.stringify({ input }),
       })
-      return probe.ok ? true : undefined
-    })
-  },
-  rpc: async (location: string, rpcID: string, method: string, input: unknown) => {
-    const response = await fetch(`${base}/api/rpc/${encodeURIComponent(rpcID)}/${encodeURIComponent(method)}?${where(location)}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...auth() },
-      body: JSON.stringify({ input }),
-    })
-    const body = (await response.json().catch(() => ({}))) as { output?: unknown; message?: string }
-    if (!response.ok) throw new Error(`${method} failed: ${response.status} ${JSON.stringify(body)}`)
-    return body.output
-  },
-})
+      const body = (await response.json().catch(() => ({}))) as { output?: unknown; message?: string }
+      if (!response.ok) throw new Error(`${method} failed: ${response.status} ${JSON.stringify(body)}`)
+      return body.output
+    },
+    /** Exactly what `ctx.permission.assert` posts, over the same endpoint. */
+    permission: async (sessionID: string, action: string, resources: string[]) =>
+      (
+        await request<{ data: { id: string; effect: string } }>("POST", `${base}/api/session/${sessionID}/permission`, {
+          action,
+          resources,
+          save: [],
+        })
+      ).data,
+    permissionList: async (sessionID: string) =>
+      (await request<{ data: { id: string; action: string; resources: string[] }[] }>("GET", `${base}/api/session/${sessionID}/permission`)).data,
+    permissionReply: async (sessionID: string, requestID: string, decision: "once" | "always" | "reject", message: string) => {
+      const response = await fetch(`${base}/api/session/${sessionID}/permission/${requestID}/reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...auth() },
+        body: JSON.stringify({ decision, message }),
+      })
+      check(response.status === 204, `permission reply failed: ${response.status}`)
+    },
+    session: async (location: string) =>
+      (await request<{ data: { id: string } }>("POST", `${base}/api/session?${where(location)}`, { title: "e2e permissions" })).data.id,
+  }
+}
+
+/** The hash the person was shown, then the approval for exactly that hash. */
+async function approve(base: string, location: string, id: string) {
+  const diff = (await server(base).rpc(location, "kagan.ext", "diff", { id })) as { text: string; hash: string }
+  return { diff, approved: await server(base).rpc(location, "kagan.ext", "approve", { id, hash: diff.hash }) }
+}
 
 async function waitFor<T>(what: string, read: () => Promise<T | undefined>, timeout = 30_000): Promise<T> {
   const until = Date.now() + timeout
@@ -187,11 +227,24 @@ say(`staged at ${stagedDir(project, "hello")}: ${(await readdir(stagedDir(projec
 say(await call("ext_check", { id: "hello" }))
 check(!rows.some((row) => row.id === "hello"), "staged code ran: hello is already loaded")
 
-step("the person approves it through the TUI's RPC (approve)")
-const approved = await server(base).rpc(project, "kagan.ext", "approve", { id: "hello" })
-say(`approve -> ${JSON.stringify(approved)}`)
+step("the person approves it through the TUI's RPC (diff, approve)")
+const hello = await approve(base, project, "hello")
+check(hello.diff.text.includes(`hash ${hello.diff.hash}`), "the diff does not carry its hash")
+say(`diff hash ${hello.diff.hash}; approve -> ${JSON.stringify(hello.approved)}`)
 say(`installed at ${installedDir(project, "hello")}: ${(await readdir(installedDir(project, "hello"))).join(", ")}`)
-check((approved as { ok?: boolean }).ok === true, "approve did not report success")
+check((hello.approved as { ok?: boolean }).ok === true, "approve did not report success")
+
+step("a stale hash is refused, and nothing is installed")
+await call("ext_new", { id: "drift", kind: "server" })
+const drift = (await server(base).rpc(project, "kagan.ext", "diff", { id: "drift" })) as { hash: string }
+await writeFile(
+  path.join(stagedDir(project, "drift"), "index.ts"),
+  'import { Plugin } from "@opencode/plugin"\nexport default Plugin.define({ id: "drift", setup() {} })\n// edited after the person looked\n',
+)
+const stale = (await server(base).rpc(project, "kagan.ext", "approve", { id: "drift", hash: drift.hash })) as { ok: boolean; message: string }
+say(`approve with the old hash -> ${JSON.stringify(stale)}`)
+check(stale.ok === false && stale.message.includes("changed since it was shown"), "a stale hash was not refused")
+check(!(await readdir(path.join(project, ".opencode", "plugins"))).includes("drift"), "a stale hash still installed the extension")
 
 step("the TUI reloads the location, and opencode loads it")
 await server(base).reload(project)
@@ -202,6 +255,19 @@ const loaded = await waitFor("hello to load", async () => {
 })
 say(`hello is ${loaded.find((row) => row.id === "hello")!.state.status}`)
 
+step("a TUI scaffold promotes and loads its tui.tsx (features.tui)")
+say(await call("ext_new", { id: "panel", kind: "tui" }))
+const panel = await approve(base, project, "panel")
+say(`panel approve -> ${JSON.stringify(panel.approved)}`)
+await server(base).reload(project)
+const withPanel = await waitFor("panel to load", async () => {
+  const fresh = await server(base).plugins(project)
+  return fresh.find((row) => row.id === "panel" && row.state.status === "active") ? fresh : undefined
+})
+const panelRow = withPanel.find((row) => row.id === "panel") as { features?: { tui?: boolean } }
+say(`panel is active, features: ${JSON.stringify(panelRow.features)}`)
+check(panelRow.features?.tui === true, "opencode does not see the promoted TUI part")
+
 step("a broken extension becomes visible to the agent")
 await call("ext_new", { id: "sad", kind: "server" })
 await writeFile(
@@ -209,8 +275,8 @@ await writeFile(
   'import { Plugin } from "@opencode/plugin"\n\nexport default Plugin.define({\n  id: "sad",\n  setup() {\n    throw new Error("this extension is broken on purpose")\n  },\n})\n',
 )
 say(await call("ext_check", { id: "sad" }))
-const sad = await server(base).rpc(project, "kagan.ext", "approve", { id: "sad" })
-check((sad as { ok?: boolean }).ok === true, "approve of the broken extension failed")
+const sad = await approve(base, project, "sad")
+check((sad.approved as { ok?: boolean }).ok === true, "approve of the broken extension failed")
 await server(base).reload(project)
 const failedRows = await waitFor("sad to fail", async () => {
   const rows = await server(base).plugins(project)
@@ -226,6 +292,31 @@ say(status)
 check(status.includes("hello active"), "ext_status does not show the loaded extension")
 check(status.includes("broken on purpose"), "ext_status does not show the failure")
 check(status.includes("sad (installed)") && status.includes("hello (installed)"), "ext_status does not show the staged copies")
+
+step("the real permission path asks, and a real rejection installs nothing")
+const sessionID = await server(base).session(project)
+await call("ext_new", { id: "asked", kind: "server" })
+const askedHash = ((await server(base).rpc(project, "kagan.ext", "diff", { id: "asked" })) as { hash: string }).hash
+const evaluated = await server(base).permission(sessionID, "ext.promote", [`asked@${askedHash}`])
+say(`permission effect for ext.promote under a default config: ${evaluated.effect}`)
+check(evaluated.effect === "ask", "the guard did not turn ext.promote into a question")
+const pending = await server(base).permissionList(sessionID)
+const request = pending.find((item) => item.action === "ext.promote")
+check(!!request, "no permission request was created")
+say(`asked for ${request!.action} on ${request!.resources.join(", ")}`)
+await server(base).permissionReply(sessionID, request!.id, "reject", "not this one")
+check((await server(base).permissionList(sessionID)).every((item) => item.id !== request!.id), "the rejected request is still pending")
+check(!(await readdir(path.join(project, ".opencode", "plugins"))).includes("asked"), "a rejected permission still installed the extension")
+say("rejected: nothing installed")
+
+step("the /extensions page in a real terminal (tmux, no model)")
+const tui = await proofOfPage({ project, env })
+say("--- /extensions ---")
+say(tui.capture)
+if (tui.prompt) {
+  say("--- after q, typed jkaq ---")
+  say(tui.prompt.split("\n").filter((line) => line.includes("jkaq") || line.includes("Build")).join("\n"))
+}
 
 step("remove asks, reverts when there is a saved version, rejects a staged copy")
 const removed = await server(base).rpc(project, "kagan.ext", "remove", { id: "sad" })
@@ -257,10 +348,67 @@ say(`touched is ${touched.find((row) => row.id === "touched")!.state.status}`)
 step("what this run saw")
 say(`- the kit loaded in a real opencode v2.3.2 server (${rows.length} plugins listed, server + tui + rpc features)`)
 say("- staging stayed invisible to the loader")
-say("- the approval RPC installed hello, the TUI's location reload asked opencode to re-read plugins, and opencode then reported it active")
+say("- the approval RPC installed the exact hash it showed, and a hash from before an edit was refused")
+say("- a promoted TUI extension loaded with features.tui")
 say("- a throwing extension was reported failed with its error, and ext_status carried it to the agent")
+say(`- a real permission evaluation for ext.promote asked (effect) and a real reject left nothing installed`)
+say("- the /extensions page rendered in a real terminal, listed the failed extension, and gave the keys back to the prompt")
 say(`- the agent's own ext_promote asked first ("${asked.join("; ")}") and a refusal left nothing installed`)
 
 stop()
 if (keep) say(`\nkept ${root}`)
 else await rm(root, { recursive: true, force: true })
+
+/**
+ * The cheapest proof the TUI page works: a real terminal, no model. Opens
+ * `/extensions`, shows the failed extension, closes with `q`, then types into
+ * the prompt to show the page's keys did not eat the letters.
+ */
+async function proofOfPage(input: { project: string; env: Record<string, string | undefined> }) {
+  const has = await Bun.spawn(["tmux", "-V"], { stdout: "ignore", stderr: "ignore" }).exited
+  if (has !== 0) return { capture: "(tmux is not installed; the page was not driven)" }
+
+  const name = `kagan-e2e-${port}`
+  const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`
+  const command = Object.entries(input.env)
+    .filter(([key]) => key.startsWith("XDG_"))
+    .map(([key, value]) => `${key}=${shellQuote(value ?? "")}`)
+    .join(" ")
+  const session = Bun.spawn(["tmux", "new-session", "-d", "-s", name, "-x", "120", "-y", "40", "-c", input.project, `${command} opencode --standalone`], {
+    stdout: "ignore",
+    stderr: "inherit",
+  })
+  await session.exited
+
+  const run = async (...args: string[]) => {
+    await Bun.spawn(["tmux", ...args], { stdout: "ignore", stderr: "ignore" }).exited
+  }
+  const capture = async () => {
+    const child = Bun.spawn(["tmux", "capture-pane", "-p", "-t", name], { stdout: "pipe", stderr: "ignore" })
+    return (await new Response(child.stdout).text()).trim()
+  }
+
+  try {
+    await Bun.sleep(12_000)
+    // Text and Enter must be separate keystrokes: the completion needs a beat to open before Enter dispatches it.
+    await run("send-keys", "-t", name, "-l", "/extensions")
+    await Bun.sleep(1_500)
+    await run("send-keys", "-t", name, "Enter")
+    await Bun.sleep(3_000)
+    const page = await capture()
+    check(page.includes("Extensions"), "the /extensions page did not render:\n" + page)
+    check(/sad failed:/.test(page), "the /extensions page does not show the failed extension:\n" + page)
+    check(page.includes("installed  hello active"), "the /extensions page does not show the loaded extension:\n" + page)
+
+    // `q` closes the page; every letter after it must reach the prompt.
+    await run("send-keys", "-t", name, "q")
+    await Bun.sleep(1_500)
+    await run("send-keys", "-t", name, "-l", "jkaq")
+    await Bun.sleep(1_500)
+    const prompt = await capture()
+    check(prompt.includes("jkaq"), "the page's keys are still swallowing the prompt:\n" + prompt)
+    return { capture: page, prompt }
+  } finally {
+    await run("kill-session", "-t", name)
+  }
+}

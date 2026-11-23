@@ -27,7 +27,7 @@ test("a relative plugin path is caught too", async () => {
 })
 
 test("editing the config that decides what loads becomes a question", async () => {
-  for (const file of ["opencode.json", "opencode.jsonc"]) {
+  for (const file of ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"]) {
     const event = evaluate("edit", [`/work/app/${file}`])
     await guard(project, event)
     expect(event.effect, file).toBe("ask")

@@ -30,9 +30,10 @@ export const skillsRoot = (project: string) => inProject(project, "ext-kit", "sk
 export const temporaryRoot = (project: string) => path.join(stagingRoot(project), ".tmp")
 
 /**
- * Only `plugins` is made at setup: opencode watches the plugin folders it saw
- * at startup, so a folder created later by the first promote can be missed
- * until a restart. Staging and the skill copy appear on first use.
+ * `plugins` is made at setup: opencode watches the plugin folders it saw at
+ * startup, so a folder created later by the first promote can be missed until a
+ * restart. The skills copy is made at setup too, because each registered skill
+ * points at a real file. Staging appears on first use.
  */
 export async function ensurePluginsRoot(project: string) {
   await mkdir(pluginsRoot(project), { recursive: true })

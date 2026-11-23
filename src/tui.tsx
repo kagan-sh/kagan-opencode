@@ -33,12 +33,20 @@ const label = (item: Item) => {
   return `installed  ${item.id} ${item.status}${item.error ? `: ${first(item.error)}` : ""}`
 }
 
+/** What the page is showing instead of the list: the whole diff to read, and optionally to approve. */
+interface Review {
+  readonly title: string
+  readonly text: string
+  readonly install?: () => Promise<WireReply>
+}
+
 function Extensions() {
   const ctx = usePlugin()
   const location = () => ctx.location ?? ctx.data.location.default()
   const server = () => ctx.client.rpc(Contract)
   const [snapshot, setSnapshot] = createSignal<WireSnapshot | undefined>()
   const [cursor, setCursor] = createSignal(0)
+  const [review, setReview] = createSignal<Review | undefined>()
 
   const refresh = async () => {
     try {
@@ -63,37 +71,50 @@ function Extensions() {
     ctx.ui.toast.show({ message: error instanceof Error ? error.message : String(error), variant: "error" })
 
   /**
-   * What the person agrees to: the whole diff for a staged copy, whose hash is
-   * carried into the approval; the state for an installed one.
+   * A staged copy is read in full, in a view that scrolls, before anyone can
+   * approve it. The install carries the hash of exactly the text on screen.
    */
-  const act = async (verb: string, run: (id: string, hash: string) => Promise<WireReply>) => {
+  const act = async (verb: string, install: (id: string, hash: string) => Promise<WireReply>) => {
     const item = selected()
     if (!item) return
     try {
-      let hash = ""
-      let detail = ""
       if (item.kind === "staged") {
         const diff = (await server().diff({ id: item.id }, { location: location() })) as WireDiff
-        detail = diff.text
-        hash = diff.hash
-      } else if (item.kind === "installed") {
-        detail = `${item.id} is installed and ${item.status}.${item.error ? `\n\n${item.error}` : ""}`
-      } else {
-        detail = `${item.id} failed to load.\n\n${item.error}`
+        setReview({
+          title: `${verb} ${item.id}?  hash ${diff.hash}`,
+          text: diff.text,
+          ...(verb === "Install" ? { install: () => install(item.id, diff.hash) } : {}),
+        })
+        return
       }
-      const ok = await confirm(`${verb} ${item.id}?`, detail, verb)
-      if (!ok) return
-      show(await run(item.id, hash))
+      const detail =
+        item.kind === "installed"
+          ? `${item.id} is installed and ${item.status}.${item.error ? `\n\n${item.error}` : ""}`
+          : `${item.id} failed to load.\n\n${item.error}`
+      if (!(await confirm(`${verb} ${item.id}?`, detail, verb))) return
+      show(await install(item.id, ""))
     } catch (error) {
       fail(error)
     }
     await refresh()
   }
 
-  const loadDiff = async (id: string) => {
+  const commit = async () => {
+    const pending = review()
+    if (!pending?.install) return
+    setReview(undefined)
+    try {
+      show(await pending.install())
+    } catch (error) {
+      fail(error)
+    }
+    await refresh()
+  }
+
+  const read = async (id: string) => {
     try {
       const diff = (await server().diff({ id }, { location: location() })) as WireDiff
-      await ctx.ui.dialog.alert({ title: `Extension ${id}`, message: diff.text })
+      setReview({ title: `Extension ${id}  hash ${diff.hash}`, text: diff.text })
     } catch (error) {
       fail(error)
     }
@@ -108,62 +129,86 @@ function Extensions() {
     const item = selected()
     return item?.kind === "installed" && (!onlyRevertable || item.revertable)
   }
+  const listing = () => review() === undefined
 
   ctx.keymap.layer(() => ({
     mode: "global",
-    // Only while this page is on screen: `a`, `x`, `q` and the arrow keys belong to the prompt otherwise.
+    // Only while this page is on screen: `a`, `x`, `q` and the arrows belong to the prompt otherwise.
     enabled: () => ctx.ui.router.current().type === "plugin",
     commands: [
-      { id: `${page}.up`, bind: "up", run: () => move(-1) },
-      { id: `${page}.down`, bind: "down", run: () => move(1) },
-      { id: `${page}.up.k`, bind: "k", run: () => move(-1) },
-      { id: `${page}.down.j`, bind: "j", run: () => move(1) },
-      { id: `${page}.diff`, bind: "o", title: "Show the diff", enabled: () => !!selected(), run: () => void loadDiff(selected()!.id) },
+      { id: `${page}.up`, bind: "up", enabled: listing, run: () => move(-1) },
+      { id: `${page}.down`, bind: "down", enabled: listing, run: () => move(1) },
+      { id: `${page}.up.k`, bind: "k", enabled: listing, run: () => move(-1) },
+      { id: `${page}.down.j`, bind: "j", enabled: listing, run: () => move(1) },
+      { id: `${page}.diff`, bind: "o", title: "Show the diff", enabled: () => listing() && !!selected(), run: () => void read(selected()!.id) },
       {
         id: `${page}.approve`,
         bind: "a",
         title: "Approve and install",
-        enabled: staged,
+        enabled: () => listing() && staged(),
         run: () => void act("Install", (id, hash) => server().approve({ id, hash }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.reject`,
         bind: "x",
         title: "Reject and delete the staged copy",
-        enabled: staged,
+        enabled: () => listing() && staged(),
         run: () => void act("Reject", (id) => server().reject({ id }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.remove`,
         bind: "d",
         title: "Remove the installed extension",
-        enabled: () => installed(),
+        enabled: () => listing() && !!installed(),
         run: () => void act("Remove", (id) => server().remove({ id }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.revert`,
         bind: "v",
         title: "Go back to the saved version",
-        enabled: () => installed(true),
+        enabled: () => listing() && installed(true),
         run: () => void act("Revert", (id) => server().revert({ id }, { location: location() }) as Promise<WireReply>),
       },
-      { id: `${page}.close`, bind: "q", title: "Close extensions", run: () => ctx.ui.router.navigate({ type: "home" }) },
+      { id: `${page}.close`, bind: "q", title: "Close extensions", enabled: listing, run: () => ctx.ui.router.navigate({ type: "home" }) },
+      {
+        id: `${page}.install`,
+        bind: "return",
+        title: "Install the reviewed change",
+        enabled: () => !!review()?.install,
+        run: () => void commit(),
+      },
+      { id: `${page}.back`, bind: "escape", enabled: () => !listing(), run: () => setReview(undefined) },
     ],
   }))
 
   return (
-    <box flexDirection="column">
-      <text>Extensions</text>
-      <Show when={snapshot()} fallback={<text>loading...</text>}>
-        <For each={items(snapshot())}>{(item, index) => <text fg={index() === cursor() ? "yellow" : "gray"}>{label(item)}</text>}</For>
-        <Show when={items(snapshot()).length === 0}>
-          <text>nothing staged or installed; ask the agent to ext_new one</text>
-        </Show>
-        <text> </text>
-        <text>a approve  x reject  d remove  v revert  o diff  q close</text>
-        <text>staged code does not run. installed code runs with your full rights.</text>
-      </Show>
-    </box>
+    <Show
+      when={review()}
+      fallback={
+        <box flexDirection="column">
+          <text>Extensions</text>
+          <Show when={snapshot()} fallback={<text>loading...</text>}>
+            <For each={items(snapshot())}>{(item, index) => <text fg={index() === cursor() ? "yellow" : "gray"}>{label(item)}</text>}</For>
+            <Show when={items(snapshot()).length === 0}>
+              <text>nothing staged or installed; ask the agent to ext_new one</text>
+            </Show>
+            <text> </text>
+            <text>a approve  x reject  d remove  v revert  o diff  q close</text>
+            <text>staged code does not run. installed code runs with your full rights.</text>
+          </Show>
+        </box>
+      }
+    >
+      {(view: () => Review) => (
+        <box flexDirection="column">
+          <text fg="yellow">{view().title}</text>
+          <scrollbox flexGrow={1} focused>
+            <text>{view().text}</text>
+          </scrollbox>
+          <text>{view().install ? "up/down scroll  enter install  esc back" : "up/down scroll  esc back"}</text>
+        </box>
+      )}
+    </Show>
   )
 }
 

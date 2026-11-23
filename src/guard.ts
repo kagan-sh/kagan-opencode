@@ -73,9 +73,12 @@ export async function guard(project: string, event: Evaluation): Promise<void> {
         pluginsRoot(realProject),
         path.join(realProject, "opencode.json"),
         path.join(realProject, "opencode.jsonc"),
+        path.join(realProject, ".opencode", "opencode.json"),
+        path.join(realProject, ".opencode", "opencode.jsonc"),
         path.join(configDir(), "plugins"),
         path.join(configDir(), "opencode.json"),
         path.join(configDir(), "opencode.jsonc"),
+        path.join(configDir(), "cli.json"),
       ].map(canonical),
     )
     const targets = await Promise.all(event.resources.map((resource) => canonical(path.resolve(project, resource))))
