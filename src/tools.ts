@@ -1,58 +1,129 @@
-import { readdir } from "node:fs/promises"
-import { check } from "./check.ts"
-import { assertId, stagedDir, stagingRoot } from "./paths.ts"
+import type { PermissionDomain } from "@opencode/plugin/promise/permission"
+import type { Info, ToolContext } from "@opencode/plugin/promise/tool"
+import type { Kit } from "./kit.ts"
+import { assertId } from "./paths.ts"
 import { scaffold, type Kind } from "./scaffold.ts"
 
-interface PluginRow {
-  readonly id?: string
-  readonly source: unknown
-  readonly state: { readonly status: "active" } | { readonly status: "failed"; readonly error: string }
-}
-
 export interface ToolDeps {
+  readonly kit: Kit
   readonly project: string
-  readonly plugins: () => Promise<readonly PluginRow[]>
+  readonly permission: Pick<PermissionDomain, "assert">
 }
 
-const object = (properties: Record<string, unknown>, required: string[]) => ({
+const object = (properties: Record<string, unknown>, required: readonly string[]) => ({
   type: "object" as const,
   properties,
   required,
   additionalProperties: false,
 })
 
-export function extensionTools(deps: ToolDeps) {
+const text = (content: string) => ({ content })
+
+/** A person says yes. The kit cannot enforce it, so this is the only gate there is. */
+const ask = (
+  deps: ToolDeps,
+  context: ToolContext,
+  action: string,
+  resources: string[],
+  metadata: Record<string, string>,
+) =>
+  deps.permission.assert({
+    sessionID: context.sessionID,
+    agent: context.agent,
+    source: { type: "tool", messageID: context.messageID, id: context.id },
+    action,
+    resources,
+    metadata,
+  })
+
+export function extensionTools(deps: ToolDeps): Info[] {
+  const { kit } = deps
+
   return [
     {
       name: "ext_new",
-      description: "Scaffold a new opencode extension into .opencode/staging/<id>. Nothing there runs until a person promotes it.",
+      description:
+        "Scaffold a new opencode extension into .opencode/staging/<id>. Nothing there runs until a person promotes it.",
       input: object({ id: { type: "string" }, kind: { type: "string", enum: ["server", "tui"] } }, ["id", "kind"]),
-      execute: async (input: unknown) => {
+      execute: async (input) => {
         const { id, kind } = input as { id: string; kind: Kind }
         const made = await scaffold(deps.project, id, kind)
-        return { content: `Created ${made.dir}\nFiles: ${made.files.join(", ")}\nNext: edit, then ext_check.` }
+        return text(
+          [
+            `created ${made.dir}`,
+            `files: ${made.files.join(", ")}`,
+            "Edit the files, then ext_check. Nothing here runs until ext_promote.",
+          ].join("\n"),
+        )
       },
     },
     {
       name: "ext_check",
-      description: "Check a staged extension's shape. Runs no extension code. Returns a list of problems, or OK.",
+      description:
+        "Check a staged extension: folder shape, id, imports, then a typecheck against the host's @opencode/plugin types. Runs no extension code.",
       input: object({ id: { type: "string" } }, ["id"]),
-      execute: async (input: unknown) => {
-        const { id } = input as { id: string }
-        const problems = await check(stagedDir(deps.project, id), assertId(id))
-        return { content: problems.length ? problems.map((p) => `- ${p}`).join("\n") : "OK" }
+      execute: async (input) => {
+        const problems = await kit.check(assertId((input as { id: string }).id))
+        return text(problems.length ? problems.map((problem) => `- ${problem}`).join("\n") : "OK")
       },
     },
     {
       name: "ext_status",
-      description: "List staged extensions and which loaded plugins are active or failed, with the error.",
+      description:
+        "Staged and installed extensions, which loaded plugins failed and why, and the last changes made to extensions.",
       input: object({}, []),
       execute: async () => {
-        const staged = await readdir(stagingRoot(deps.project)).catch(() => [])
-        const rows = (await deps.plugins()).map((p) =>
-          p.state.status === "failed" ? `FAILED ${p.id ?? JSON.stringify(p.source)}: ${p.state.error}` : `active ${p.id ?? JSON.stringify(p.source)}`,
+        const snapshot = await kit.snapshot()
+        const lines = [
+          `staged: ${snapshot.staged.map((item) => `${item.id}${item.installed ? " (installed)" : ""}`).join(", ") || "none"}`,
+          `installed: ${snapshot.installed.map((item) => `${item.id} ${item.status}${item.error ? `: ${item.error}` : ""}`).join(", ") || "none"}`,
+          `failed plugins: ${snapshot.failed.map((item) => `${item.label}: ${item.error}`).join("; ") || "none"}`,
+          ...(snapshot.audit.length
+            ? ["recent:", ...snapshot.audit.map((event) => `  ${event.at} ${event.action} ${event.id} via ${event.via} ${event.hash}`)]
+            : ["recent: none"]),
+        ]
+        return text(lines.join("\n"))
+      },
+    },
+    {
+      name: "ext_promote",
+      description:
+        "Ask the person to approve a staged extension, then install it into .opencode/plugins where it loads at once. Shows the files, the declared contributions and a diff.",
+      input: object({ id: { type: "string" } }, ["id"]),
+      execute: async (input, context) => {
+        const id = assertId((input as { id: string }).id)
+        const summary = await kit.describe(id)
+        await ask(deps, context, "ext.promote", [id], { summary })
+        const promoted = await kit.approve(id, "tool")
+        return text(
+          [
+            `promoted ${id} (${promoted.files.join(", ")}), hash ${promoted.hash}`,
+            "opencode loads it now. Run ext_status to confirm it is active, or check whether it failed and why.",
+          ].join("\n"),
         )
-        return { content: [`staged: ${staged.join(", ") || "none"}`, ...rows].join("\n") }
+      },
+    },
+    {
+      name: "ext_remove",
+      description: "Ask the person, then delete an installed extension from .opencode/plugins. Staged and saved versions stay.",
+      input: object({ id: { type: "string" } }, ["id"]),
+      execute: async (input, context) => {
+        const id = assertId((input as { id: string }).id)
+        const summary = await kit.describe(id).catch(() => undefined)
+        await ask(deps, context, "ext.remove", [id], summary ? { summary } : {})
+        const files = await kit.remove(id, "tool")
+        return text(`removed ${id} (${files.length} files). Saved versions are kept for ext_revert if one exists.`)
+      },
+    },
+    {
+      name: "ext_revert",
+      description: "Ask the person, then swap an installed extension back to the newest saved version.",
+      input: object({ id: { type: "string" } }, ["id"]),
+      execute: async (input, context) => {
+        const id = assertId((input as { id: string }).id)
+        await ask(deps, context, "ext.revert", [id], {})
+        const restored = await kit.revert(id, "tool")
+        return text(`reverted ${id} to ${restored.stamp}. Run ext_status to confirm it loaded.`)
       },
     },
   ]
