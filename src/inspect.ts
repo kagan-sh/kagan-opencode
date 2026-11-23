@@ -1,6 +1,5 @@
 import { readdir, readFile, stat } from "node:fs/promises"
 import path from "node:path"
-import { assertId } from "./paths.ts"
 
 const skipped = new Set(["node_modules", ".git", ".DS_Store"])
 const entryFile = /^(index|server)\.(ts|js)$/
@@ -87,6 +86,5 @@ export async function inspect(dir: string, id: string): Promise<Inspection> {
     for (const match of text.matchAll(/from\s+["']([^"']+)["']/g)) imports.add(match[1]!)
   }
 
-  assertId(id)
   return { id, files, sources, contributions: [...contributions].sort(), imports: [...imports].sort(), problems }
 }
