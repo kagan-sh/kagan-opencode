@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat } from "node:fs/promises"
 import path from "node:path"
 import { walkFiles } from "./inspect.ts"
-import { historyRoot, installedDir, pluginsRoot, stagedDir } from "./paths.ts"
+import { historyRoot, installedDir, pluginsRoot, stagedDir, temporaryRoot } from "./paths.ts"
 
 const exists = async (target: string) => !!(await stat(target).catch(() => undefined))
 
@@ -18,7 +18,7 @@ async function copyTree(from: string, to: string, files: readonly string[]) {
   }
 }
 
-/** Content hash shown in the audit trail and the approval text. */
+/** Content hash shown in the approval text, checked before the install, and kept in the audit trail. */
 export async function hashFiles(dir: string, files: readonly string[]): Promise<string> {
   const hash = createHash("sha256")
   for (const file of [...files].sort()) hash.update(file).update("\0").update(await readFile(path.join(dir, file)))
@@ -39,18 +39,28 @@ export interface Promotion {
 
 /**
  * Copies a staged extension into the plugins folder, where the watcher loads it
- * at once. The version it replaces is kept for `revert`. Approval is the
- * caller's job: this function only touches files.
+ * at once. The version it replaces is kept for `revert`.
+ *
+ * `expected` is the hash a person was shown. The copy is hashed before the
+ * rename, so bytes that changed after the approval never reach the plugins
+ * folder. Approval is the caller's job: this function only touches files.
  */
-export async function promote(project: string, id: string): Promise<Promotion> {
+export async function promote(project: string, id: string, expected: string): Promise<Promotion> {
   const from = stagedDir(project, id)
   const files = await walkFiles(from)
   if (files.length === 0) throw new Error(`${from} is empty`)
 
+  // Under staging, not plugins: a dot-folder next to loaded plugins is not worth the risk.
   const target = installedDir(project, id)
-  const staging = path.join(pluginsRoot(project), `.${id}.staged`)
-  await rm(staging, { recursive: true, force: true })
-  await copyTree(from, staging, files)
+  const copy = path.join(temporaryRoot(project), `${id}-${stamp()}`)
+  await mkdir(path.dirname(copy), { recursive: true })
+  await copyTree(from, copy, files)
+
+  const hash = await hashFiles(copy, files)
+  if (hash !== expected) {
+    await rm(copy, { recursive: true, force: true })
+    throw new Error(`refused: ${id} changed after it was shown (${expected} -> ${hash}); look at it again before approving`)
+  }
 
   let replaced: string | undefined
   let backup: string | undefined
@@ -62,14 +72,14 @@ export async function promote(project: string, id: string): Promise<Promotion> {
       await rename(target, backup)
     }
     await mkdir(pluginsRoot(project), { recursive: true })
-    await rename(staging, target)
+    await rename(copy, target)
   } catch (error) {
     if (backup) await rename(backup, target).catch(() => undefined)
-    await rm(staging, { recursive: true, force: true })
+    await rm(copy, { recursive: true, force: true })
     throw error
   }
 
-  return { files, hash: await hashFiles(from, files), ...(replaced ? { replaced } : {}) }
+  return { files, hash, ...(replaced ? { replaced } : {}) }
 }
 
 /** Deletes the installed copy. Staging and history are untouched. */

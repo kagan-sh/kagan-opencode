@@ -1,38 +1,25 @@
-import { describe, expect, test } from "bun:test"
+import { expect, test } from "bun:test"
 import type { PermissionDomain } from "@opencode/plugin/promise/permission"
-import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { readFile, readdir, symlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { createKit, type PluginRow } from "../src/kit.ts"
-import { assertId, installedDir, isPluginPath, stagedDir, stagingRoot } from "../src/paths.ts"
-import { history } from "../src/promote.ts"
+import { assertId, ensurePluginsRoot, installedDir, isPluginPath, stagedDir, stagingRoot } from "../src/paths.ts"
+import { history, promote } from "../src/promote.ts"
 import { scaffold } from "../src/scaffold.ts"
 import { extensionTools, type ToolDeps } from "../src/tools.ts"
+import { memory, project } from "./support.ts"
 
-const project = () => mkdtemp(path.join(tmpdir(), "kagan-ext-"))
-
-function memory(): StorageDomain {
-  const values = new Map<string, Parameters<StorageDomain["set"]>[1]>()
-  return {
-    get: async (key) => values.get(key),
-    set: async (key, value) => void values.set(key, value),
-    remove: async (key) => void values.delete(key),
-    scan: async (options) => ({
-      entries: [...values.entries()]
-        .filter(([key]) => key.startsWith(options.prefix))
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, value]) => ({ key, value })),
-    }),
-  } as StorageDomain
+interface Asked {
+  action: string
+  resources: readonly string[]
+  save?: readonly string[]
 }
 
-const asked: { action: string; resources: readonly string[] }[] = []
-const permission = (allow = true): Pick<PermissionDomain, "assert"> =>
+const permission = (asked: Asked[], allow = true): Pick<PermissionDomain, "assert"> =>
   ({
-    assert: async (input: { action: string; resources: readonly string[] }) => {
-      asked.push({ action: input.action, resources: input.resources })
+    assert: async (input: { action: string; resources: readonly string[]; save?: readonly string[] }) => {
+      asked.push({ action: input.action, resources: input.resources, save: input.save })
       if (!allow) throw new Error("the person said no")
     },
   }) as unknown as Pick<PermissionDomain, "assert">
@@ -53,13 +40,17 @@ const rows: PluginRow[] = [
 ]
 
 function tools(dir: string, allow = true, pluginRows: readonly PluginRow[] = rows) {
+  const asked: Asked[] = []
   const kit = createKit({ project: dir, plugins: async () => pluginRows, storage: memory() })
-  const deps: ToolDeps = { kit, project: dir, permission: permission(allow) }
+  const deps: ToolDeps = { kit, project: dir, permission: permission(asked, allow) }
   const byName = new Map(extensionTools(deps).map((tool) => [tool.name, tool]))
   const call = async (name: string, input: Record<string, unknown> = {}) =>
     String((await byName.get(name)!.execute(input, context())).content)
-  return { kit, call }
+  return { kit, call, asked }
 }
+
+const index = (id: string, extra = "") =>
+  `import { Plugin } from "@opencode/plugin"\nexport default Plugin.define({ id: "${id}", setup() {} })\n${extra}`
 
 test("ids cannot escape the staging folder", () => {
   for (const bad of ["../x", "a/b", "A", "x", "", "-a", 7, undefined]) expect(() => assertId(bad)).toThrow()
@@ -69,7 +60,7 @@ test("ids cannot escape the staging folder", () => {
   expect(isPluginPath("/p", ".opencode/staging/x/index.ts")).toBe(false)
 })
 
-test("a scaffolded server extension typechecks against the host's types", async () => {
+test("a scaffolded server extension typechecks against the kit's pinned types", async () => {
   const dir = await project()
   const made = await scaffold(dir, "hello", "server")
   expect(made.files).toEqual(["index.ts"])
@@ -112,15 +103,84 @@ test("check catches a type error without running the extension", async () => {
   expect(problems.join("\n")).toContain("index.ts")
 })
 
+test("the id in tui.tsx is checked against the folder too", async () => {
+  const dir = await project()
+  await scaffold(dir, "panel", "tui")
+  await writeFile(path.join(stagedDir(dir, "panel"), "tui.tsx"), 'import { Plugin } from "@opencode/plugin/tui"\nexport default Plugin.define({ id: "other.tui", setup() {} })\n')
+  const problems = await tools(dir).kit.check("panel")
+  expect(problems.some((problem) => problem.includes('"other.tui"'))).toBe(true)
+})
+
+test("the approval lists every file with its size and hash", async () => {
+  const dir = await project()
+  const { kit } = tools(dir)
+  await scaffold(dir, "hello", "server")
+  const shown = await kit.describe("hello")
+  expect(shown.text).toContain("hash " + shown.hash)
+  expect(shown.text).toContain("index.ts")
+  expect(shown.text).toMatch(/index\.ts\s+\d+ B\s+sha256 [0-9a-f]{12}/)
+  expect(shown.text).toContain("+")
+})
+
+test("an approval is refused when staging changed after it was shown", async () => {
+  const dir = await project()
+  const { kit } = tools(dir)
+  await scaffold(dir, "hello", "server")
+  const { hash } = await kit.describe("hello")
+  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), index("hello", "// edited after the person looked\n"))
+
+  await expect(kit.approve("hello", hash, "tool")).rejects.toThrow("changed since it was shown")
+  expect(await readdir(path.join(dir, ".opencode", "plugins")).catch(() => [])).toEqual([])
+})
+
+test("the copy is hashed before the rename, so a drift never installs", async () => {
+  const dir = await project()
+  await scaffold(dir, "hello", "server")
+  await expect(promote(dir, "hello", "000000000000")).rejects.toThrow("changed after it was shown")
+  expect(await readdir(path.join(dir, ".opencode", "plugins")).catch(() => [])).toEqual([])
+  expect(await readdir(path.join(dir, ".opencode", "staging", ".tmp"))).toEqual([])
+})
+
+test("a binary file is refused, because it cannot be shown", async () => {
+  const dir = await project()
+  const { kit } = tools(dir)
+  await scaffold(dir, "hello", "server")
+  await writeFile(path.join(stagedDir(dir, "hello"), "blob.bin"), Buffer.from([0x00, 0x01, 0x02]))
+
+  expect((await kit.check("hello")).some((problem) => problem.includes("cannot approve it"))).toBe(true)
+  await expect(kit.describe("hello")).rejects.toThrow("cannot be promoted")
+})
+
+test("a change too large to show is refused, not cut", async () => {
+  const dir = await project()
+  const { kit } = tools(dir)
+  await scaffold(dir, "big", "server")
+  await writeFile(path.join(stagedDir(dir, "big"), "index.ts"), index("big", `// ${"x".repeat(13_000)}`))
+
+  await expect(kit.describe("big")).rejects.toThrow("cannot be shown in full")
+})
+
+test("approve refuses code that ext_check rejects", async () => {
+  const dir = await project()
+  const { kit } = tools(dir)
+  await scaffold(dir, "hello", "server")
+  await writeFile(
+    path.join(stagedDir(dir, "hello"), "index.ts"),
+    'import { Plugin } from "@opencode/plugin"\nexport default Plugin.define({\n  id: "hello",\n  setup: async (ctx) => {\n    const tools: number = ctx.tool\n  },\n})\n',
+  )
+  const { hash } = await kit.describe("hello")
+  await expect(kit.approve("hello", hash, "tool")).rejects.toThrow("cannot be promoted")
+})
+
 test("promote copies into plugins and keeps the version it replaced", async () => {
   const dir = await project()
   const { call } = tools(dir)
   await call("ext_new", { id: "hello", kind: "server" })
-  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), 'import { Plugin } from "@opencode/plugin"\nexport default Plugin.define({ id: "hello", setup() {} })\n// one\n')
+  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), index("hello", "// one\n"))
   await call("ext_promote", { id: "hello" })
   expect(await readdir(installedDir(dir, "hello"))).toEqual(["index.ts"])
 
-  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), 'import { Plugin } from "@opencode/plugin"\nexport default Plugin.define({ id: "hello", setup() {} })\n// two\n')
+  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), index("hello", "// two\n"))
   await call("ext_promote", { id: "hello" })
   expect((await history(dir, "hello")).length).toBe(1)
 
@@ -132,22 +192,41 @@ test("promote copies into plugins and keeps the version it replaced", async () =
   expect(await tools(dir).kit.check("hello")).toEqual([])
 })
 
-test("the person is asked before anything is copied", async () => {
+test("the person is asked for ext.promote with the content hash, and nothing is copied without a yes", async () => {
   const dir = await project()
-  const { call } = tools(dir, false)
+  const { call, kit, asked } = tools(dir, false)
   await call("ext_new", { id: "hello", kind: "server" })
+  const { hash } = await kit.describe("hello")
+
   const reply = await call("ext_promote", { id: "hello" }).catch((error: Error) => error.message)
   expect(reply).toContain("the person said no")
+  expect(asked).toEqual([{ action: "ext.promote", resources: [`hello@${hash}`], save: [] }])
   expect(await readdir(path.join(dir, ".opencode", "plugins")).catch(() => [])).toEqual([])
   expect(await readdir(stagedDir(dir, "hello"))).toContain("index.ts")
 })
 
+test("ext_remove and ext_revert ask too", async () => {
+  const dir = await project()
+  const { call, asked } = tools(dir)
+  await call("ext_new", { id: "hello", kind: "server" })
+  await call("ext_promote", { id: "hello" })
+  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), index("hello", "// two\n"))
+  await call("ext_promote", { id: "hello" })
+  await call("ext_revert", { id: "hello" })
+  await call("ext_remove", { id: "hello" })
+
+  expect(asked.map((entry) => entry.action)).toEqual(["ext.promote", "ext.promote", "ext.revert", "ext.remove"])
+  expect(asked.slice(-2).map((entry) => entry.resources)).toEqual([["hello"], ["hello"]])
+})
+
 test("promote refuses a staged extension with problems and does not ask", async () => {
   const dir = await project()
-  const { call } = tools(dir)
+  const { call, asked } = tools(dir)
   await call("ext_new", { id: "hello", kind: "server" })
   await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), "export const nothing = true\n")
+
   await expect(call("ext_promote", { id: "hello" })).rejects.toThrow("refused")
+  expect(asked).toEqual([])
   expect(await readdir(path.join(dir, ".opencode", "plugins")).catch(() => [])).toEqual([])
 })
 
@@ -163,6 +242,15 @@ test("ext_status shows staged, installed and failed plugins with the error", asy
   expect(reply).toContain("promote hello via tool")
 })
 
+test("ext_new and ext_check print the type folders", async () => {
+  const dir = await project()
+  const { call } = tools(dir)
+  const created = await call("ext_new", { id: "hello", kind: "server" })
+  expect(created).toContain("dist/promise")
+  expect(created).toContain("dist/tui")
+  expect(await call("ext_check", { id: "hello" })).toContain("dist/promise")
+})
+
 test("the audit trail keeps who promoted what, newest first", async () => {
   const dir = await project()
   const storage = memory()
@@ -174,11 +262,11 @@ test("the audit trail keeps who promoted what, newest first", async () => {
     onChange: async (change) => void changes.push(`${change.action} ${change.id}`),
   })
   await scaffold(dir, "hello", "server")
-  await kit.approve("hello", "tool")
-  await kit.approve("hello", "tui")
+  await kit.approve("hello", (await kit.describe("hello")).hash, "tool")
+  await kit.approve("hello", (await kit.describe("hello")).hash, "rpc")
   const trail = await kit.snapshot()
   expect(trail.audit.length).toBe(2)
-  expect(trail.audit[0]!.via).toBe("tui")
+  expect(trail.audit[0]!.via).toBe("rpc")
   expect(trail.audit[0]!.hash.length).toBe(12)
   // the TUI hears these and reloads the location
   expect(changes).toEqual(["promote hello", "promote hello"])
@@ -187,7 +275,6 @@ test("the audit trail keeps who promoted what, newest first", async () => {
 test("symlinks are refused, not followed", async () => {
   const dir = await project()
   await scaffold(dir, "hello", "server")
-  const { symlink } = await import("node:fs/promises")
   await symlink("/etc/hosts", path.join(stagedDir(dir, "hello"), "leak.ts"))
   expect((await tools(dir).kit.check("hello")).some((problem) => problem.includes("symlink"))).toBe(true)
 })
@@ -200,4 +287,10 @@ test("staging and history stay out of the plugins folder", async () => {
   await call("ext_new", { id: "other", kind: "server" })
   expect(await readdir(stagingRoot(dir))).toContain("other")
   expect(await readdir(path.join(dir, ".opencode", "plugins"))).toEqual(["hello"])
+})
+
+test("setup makes only the plugins folder the loader watches", async () => {
+  const dir = await project()
+  await ensurePluginsRoot(dir)
+  expect(await readdir(path.join(dir, ".opencode"))).toEqual(["plugins"])
 })

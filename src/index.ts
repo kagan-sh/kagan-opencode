@@ -1,9 +1,11 @@
 import { Plugin, Skill } from "@opencode/plugin"
+import { realpath } from "node:fs/promises"
 import path from "node:path"
 import { guard } from "./guard.ts"
+import { handlers } from "./handlers.ts"
 import { createKit } from "./kit.ts"
-import { assertId, ensureFolders } from "./paths.ts"
-import { Kit as Contract, type WireReply } from "./rpc.ts"
+import { ensurePluginsRoot } from "./paths.ts"
+import { Kit as Contract } from "./rpc.ts"
 import { skills, writeSkills } from "./skills.ts"
 import { extensionTools } from "./tools.ts"
 
@@ -13,17 +15,16 @@ You can add tools, commands, hooks and terminal UI parts to this opencode by wri
 
 - Load the \`ext-overview\` skill before writing one; \`ext-server\` and \`ext-tui\` have the API, \`ext-safety\` the risks.
 - Write into \`.opencode/staging/<id>\` with \`ext_new\`. Nothing there runs. \`ext_check\` must pass.
-- \`ext_promote\` asks the person to approve, then installs it. \`ext_remove\` and \`ext_revert\` ask too.
+- \`ext_promote\` shows the person every file with its hash and the whole diff, waits for approval, then installs exactly that content. \`ext_remove\` and \`ext_revert\` ask too.
 - Never write into \`.opencode/plugins\` yourself: code there runs at once with the person's full rights.
-- Approval is a convention plus guards, not a sandbox. Say so when you propose an extension.`
-
-const idOf = (input: unknown) => assertId((input as { id?: unknown } | undefined)?.id)
+- Approval is a convention plus guards, not a sandbox: any local process that can reach opencode's API can approve, and a shell can write anywhere. Say so when you propose an extension.`
 
 export default Plugin.define({
   id: "kagan.ext",
   async setup(ctx) {
-    const project = ctx.location.directory
-    await ensureFolders(project)
+    // Canonical, so the guard compares one path with the paths the edit tool reports.
+    const project = await realpath(ctx.location.directory).catch(() => ctx.location.directory)
+    await ensurePluginsRoot(project)
 
     let notify: ((change: { id: string; action: "promote" | "reject" | "remove" | "revert" }) => Promise<void>) | undefined
     const kit = createKit({
@@ -57,40 +58,7 @@ export default Plugin.define({
 
     await ctx.permission.hook("evaluate", (event) => guard(project, event))
 
-    const reply = async (act: () => Promise<string>): Promise<WireReply> => {
-      try {
-        return { ok: true, message: await act() }
-      } catch (error) {
-        return { ok: false, message: error instanceof Error ? error.message : String(error) }
-      }
-    }
-
-    const registration = await ctx.rpc.register(Contract, {
-      snapshot: () => kit.snapshot(),
-      diff: async (input) => ({ text: await kit.describe(idOf(input)) }),
-      approve: async (input) => {
-        const id = idOf(input)
-        return reply(async () => {
-          const promoted = await kit.approve(id, "tui")
-          return `promoted ${id} (${promoted.files.join(", ")})`
-        })
-      },
-      reject: async (input) => {
-        const id = idOf(input)
-        return reply(async () => {
-          await kit.reject(id, "tui")
-          return `rejected ${id}; the staged copy is gone`
-        })
-      },
-      remove: async (input) => {
-        const id = idOf(input)
-        return reply(async () => `removed ${id}, ${(await kit.remove(id, "tui")).length} files`)
-      },
-      revert: async (input) => {
-        const id = idOf(input)
-        return reply(async () => `reverted ${id} to ${(await kit.revert(id, "tui")).stamp}`)
-      },
-    })
+    const registration = await ctx.rpc.register(Contract, handlers(kit))
 
     notify = async (change) => {
       await registration.events.emit("changed", change)

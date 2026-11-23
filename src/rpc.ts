@@ -4,9 +4,15 @@ import type { Snapshot } from "./kit.ts"
 /** What the TUI receives. Mirrors `Snapshot`, which the server part returns. */
 export type WireSnapshot = Snapshot
 export type WireReply = { ok: boolean; message: string }
-export type WireDiff = { text: string }
+export type WireDiff = { text: string; hash: string }
 
 const one = { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false }
+const bound = {
+  type: "object",
+  properties: { id: { type: "string" }, hash: { type: "string" } },
+  required: ["id", "hash"],
+  additionalProperties: false,
+}
 const reply = {
   type: "object",
   properties: { ok: { type: "boolean" }, message: { type: "string" } },
@@ -82,9 +88,14 @@ export const Kit = Rpc.define({
     },
     diff: {
       input: one,
-      output: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
+      output: {
+        type: "object",
+        properties: { text: { type: "string" }, hash: { type: "string" } },
+        required: ["text", "hash"],
+        additionalProperties: false,
+      },
     },
-    approve: { input: one, output: reply },
+    approve: { input: bound, output: reply },
     reject: { input: one, output: reply },
     remove: { input: one, output: reply },
     revert: { input: one, output: reply },

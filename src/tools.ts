@@ -1,5 +1,6 @@
 import type { PermissionDomain } from "@opencode/plugin/promise/permission"
 import type { Info, ToolContext } from "@opencode/plugin/promise/tool"
+import { typeFolders } from "./check.ts"
 import type { Kit } from "./kit.ts"
 import { assertId } from "./paths.ts"
 import { scaffold, type Kind } from "./scaffold.ts"
@@ -19,7 +20,18 @@ const object = (properties: Record<string, unknown>, required: readonly string[]
 
 const text = (content: string) => ({ content })
 
-/** A person says yes. The kit cannot enforce it, so this is the only gate there is. */
+/** The `.d.ts` folders an extension should read. The kit's pin, not the host's. */
+const types = () => {
+  const folders = typeFolders()
+  return folders
+    ? `types (the kit's pin of @opencode/plugin 2.3.2): ${folders.promise} and ${folders.tui}`
+    : "types: the kit's @opencode/plugin package was not found; read the docs instead"
+}
+
+/**
+ * A person says yes. The kit cannot enforce it, so this is the only gate there
+ * is. `save: []` keeps "always" from covering any later content.
+ */
 const ask = (
   deps: ToolDeps,
   context: ToolContext,
@@ -33,6 +45,7 @@ const ask = (
     source: { type: "tool", messageID: context.messageID, id: context.id },
     action,
     resources,
+    save: [],
     metadata,
   })
 
@@ -52,6 +65,7 @@ export function extensionTools(deps: ToolDeps): Info[] {
           [
             `created ${made.dir}`,
             `files: ${made.files.join(", ")}`,
+            types(),
             "Edit the files, then ext_check. Nothing here runs until ext_promote.",
           ].join("\n"),
         )
@@ -60,11 +74,11 @@ export function extensionTools(deps: ToolDeps): Info[] {
     {
       name: "ext_check",
       description:
-        "Check a staged extension: folder shape, id, imports, then a typecheck against the host's @opencode/plugin types. Runs no extension code.",
+        "Check a staged extension: folder shape, ids, imports, then a typecheck against the kit's pinned @opencode/plugin 2.3.2 types. Runs no extension code.",
       input: object({ id: { type: "string" } }, ["id"]),
       execute: async (input) => {
         const problems = await kit.check(assertId((input as { id: string }).id))
-        return text(problems.length ? problems.map((problem) => `- ${problem}`).join("\n") : "OK")
+        return text([problems.length ? problems.map((problem) => `- ${problem}`).join("\n") : "OK", types()].join("\n"))
       },
     },
     {
@@ -88,17 +102,17 @@ export function extensionTools(deps: ToolDeps): Info[] {
     {
       name: "ext_promote",
       description:
-        "Ask the person to approve a staged extension, then install it into .opencode/plugins where it loads at once. Shows the files, the declared contributions and a diff.",
+        "Ask the person to approve a staged extension, then install that exact content into .opencode/plugins where it loads at once. The approval shows every file with its size and hash, the contributions it could find, and the whole diff; a change too large to show is refused, not cut.",
       input: object({ id: { type: "string" } }, ["id"]),
       execute: async (input, context) => {
         const id = assertId((input as { id: string }).id)
-        const summary = await kit.describe(id)
-        await ask(deps, context, "ext.promote", [id], { summary })
-        const promoted = await kit.approve(id, "tool")
+        const shown = await kit.describe(id)
+        await ask(deps, context, "ext.promote", [`${id}@${shown.hash}`], { summary: shown.text })
+        const promoted = await kit.approve(id, shown.hash, "tool")
         return text(
           [
             `promoted ${id} (${promoted.files.join(", ")}), hash ${promoted.hash}`,
-            "Run ext_status to confirm it is active. If it is not listed yet, opencode has not re-read the location: open /extensions once (that reloads it) or reload opencode.",
+            "Run ext_status to confirm it is active. If it is not listed yet, restart opencode: only an open /extensions page reloads the location by itself.",
           ].join("\n"),
         )
       },

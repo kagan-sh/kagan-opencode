@@ -4,6 +4,7 @@ import type { StorageDomain } from "@opencode/plugin/promise/storage"
 type Json = Parameters<StorageDomain["set"]>[1]
 
 const prefix = "ext-kit/audit/"
+const page = 500
 
 export type AuditEvent = {
   at: string
@@ -11,7 +12,7 @@ export type AuditEvent = {
   id: string
   hash: string
   files: string[]
-  via: "tool" | "tui"
+  via: "tool" | "rpc"
   note: string
 }
 
@@ -32,7 +33,8 @@ const read = (value: Json): AuditEvent | undefined => {
     id: event.id,
     hash: typeof event.hash === "string" ? event.hash : "",
     files: Array.isArray(event.files) ? event.files.map(String) : [],
-    via: event.via === "tui" ? "tui" : "tool",
+    // Events written before the rename said "tui"; they came over the RPC too.
+    via: event.via === "rpc" || event.via === "tui" ? "rpc" : "tool",
     note: typeof event.note === "string" ? event.note : "",
   }
 }
@@ -51,8 +53,16 @@ export function audit(storage: StorageDomain): Audit {
       await storage.set(key(event.at), event)
     },
     recent: async (limit = 5) => {
-      const { entries } = await storage.scan({ prefix, limit: 200 })
-      return [...entries]
+      // `scan` returns keys in ascending order and pages with `after`; read to the end or the newest events fall off.
+      const entries: { key: string; value: Json }[] = []
+      let after: string | undefined
+      for (;;) {
+        const result = await storage.scan({ prefix, ...(after === undefined ? {} : { after }), limit: page })
+        entries.push(...result.entries)
+        if (!result.next || result.next === after) break
+        after = result.next
+      }
+      return entries
         .sort((left, right) => right.key.localeCompare(left.key))
         .map((entry) => read(entry.value))
         .filter((event): event is AuditEvent => !!event)

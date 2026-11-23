@@ -7,7 +7,7 @@ import { inspect, walkFiles } from "./inspect.ts"
 /** Ambient stubs for the peers an extension may import but a project may not have. */
 const shim = fileURLToPath(new URL("../shims/extension.d.ts", import.meta.url))
 
-/** The installed @opencode/plugin package, found from this module's own dependency. */
+/** The pin of `@opencode/plugin` the kit itself was built against, not whatever the host runs. */
 function pluginRoot(): string | undefined {
   let root = path.dirname(fileURLToPath(import.meta.resolve("@opencode/plugin")))
   while (!existsSync(path.join(root, "dist", "promise", "index.d.ts"))) {
@@ -18,11 +18,18 @@ function pluginRoot(): string | undefined {
   return root
 }
 
+/** The `.d.ts` folders an extension should read, as `ext_new` and `ext_check` print them. */
+export function typeFolders(): { readonly promise: string; readonly tui: string } | undefined {
+  const root = pluginRoot()
+  return root ? { promise: path.join(root, "dist", "promise"), tui: path.join(root, "dist", "tui") } : undefined
+}
+
 const limits = { lines: 30 }
 
 /**
- * Typechecks the extension against the host's `@opencode/plugin` types. Runs no
- * extension code. Returns readable problems, or an empty list when it is clean.
+ * Typechecks the extension against the kit's pinned `@opencode/plugin` 2.3.2
+ * types. Runs no extension code. Returns readable problems, or an empty list
+ * when it is clean.
  */
 export async function typecheck(dir: string): Promise<string[]> {
   let names: string[]

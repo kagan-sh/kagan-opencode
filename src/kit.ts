@@ -3,9 +3,9 @@ import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { audit, type Audit, type AuditEvent } from "./audit.ts"
 import { check } from "./check.ts"
 import { diffLines } from "./diff.ts"
-import { inspect } from "./inspect.ts"
+import { hashFiles, history, promote, remove as removeInstalled, revert as revertInstalled } from "./promote.ts"
+import { inspect, type FileInfo } from "./inspect.ts"
 import { idPattern, installedDir, pluginsRoot, stagedDir, stagingRoot } from "./paths.ts"
-import { history, promote, remove as removeInstalled, revert as revertInstalled } from "./promote.ts"
 
 /** The parts of `ctx.plugin.list()` the kit reads. */
 export interface PluginRow {
@@ -38,14 +38,22 @@ const directories = async (root: string) =>
     .map((entry) => entry.name)
     .sort()
 
-const limit = 200
+/** The whole change must fit in the approval text: a cut diff hides code a person installs. */
+const shownLimit = 12_000
 
 /** A load error arrives with a full stack; the first lines have the message and the file. */
 const brief = (error: string) => error.split("\n").slice(0, 3).join("\n")
 
+const refusal = (id: string, problems: readonly string[]) =>
+  `refused: ${id} cannot be promoted\n${problems.map((problem) => `- ${problem}`).join("\n")}`
+
+const sizes = (files: readonly FileInfo[]) =>
+  files.map((file) => `  ${file.path}  ${file.bytes} B  sha256 ${file.hash}`)
+
 export function createKit(deps: KitDeps) {
   const trail: Audit = audit(deps.storage)
   const { project } = deps
+  const checkStaged = (id: string) => check(stagedDir(project, id), id)
 
   const snapshot = async (): Promise<Snapshot> => {
     const [stagedIds, installedIds, rows] = await Promise.all([
@@ -78,36 +86,43 @@ export function createKit(deps: KitDeps) {
     }
   }
 
-  /** Everything a person needs to decide: what it is, what it touches, what changes. */
-  const describe = async (id: string) => {
+  /**
+   * Everything a person needs to decide: what it is, what it touches, what
+   * changes, and the hash of those exact bytes. Refuses rather than showing
+   * less than the whole change.
+   */
+  const describe = async (id: string): Promise<{ readonly text: string; readonly hash: string }> => {
     const inspection = await inspect(stagedDir(project, id), id)
+    if (inspection.problems.length > 0) throw new Error(refusal(id, inspection.problems))
+
     const installed = await directories(pluginsRoot(project))
     const before = installed.includes(id) ? await inspect(installedDir(project, id), id).catch(() => undefined) : undefined
+    const hash = await hashFiles(stagedDir(project, id), inspection.files.map((file) => file.path))
 
     const lines = [
-      `extension ${id}`,
-      `files: ${inspection.files.join(", ") || "none"}`,
-      `contributions: ${inspection.contributions.join(", ") || "none detected"}`,
+      `extension ${id}  hash ${hash}`,
+      `files (${inspection.files.length}):`,
+      ...sizes(inspection.files),
+      `contributions (regex hints): ${inspection.contributions.join(", ") || "none detected"}`,
       `imports: ${inspection.imports.join(", ") || "none"}`,
-      inspection.problems.length
-        ? `problems:\n${inspection.problems.map((problem) => `  - ${problem}`).join("\n")}`
-        : "problems: none",
       "",
     ]
 
     for (const file of inspection.files) {
-      const after = inspection.sources.get(file)
-      if (after === undefined) {
-        lines.push(`${file}: copied as is`, "")
+      const was = before?.files.find((old) => old.path === file.path)
+      if (was?.hash === file.hash) {
+        lines.push(`${file.path}: unchanged`, "")
         continue
       }
-      const was = before?.sources.get(file)
-      lines.push(was === undefined ? `new file ${file}` : `changed file ${file}`, ...diffLines(was ?? "", after), "")
+      lines.push(`${was ? "changed" : "new"} file ${file.path}`, ...diffLines(was?.text ?? "", file.text ?? ""), "")
     }
 
     const text = lines.filter((line, index) => line !== "" || lines[index - 1] !== "").join("\n")
-    const rows = text.split("\n")
-    return rows.length > limit ? `${rows.slice(0, limit).join("\n")}\n... (truncated)` : text
+    if (text.length > shownLimit)
+      throw new Error(
+        `refused: ${id} cannot be shown in full: the whole change is ${text.length} characters, and a person must see all of it before approving (limit ${shownLimit}). Split the extension into smaller ones.`,
+      )
+    return { text, hash }
   }
 
   const record = async (event: AuditEvent) => {
@@ -115,12 +130,18 @@ export function createKit(deps: KitDeps) {
     await deps.onChange?.({ id: event.id, action: event.action })
   }
 
-  const approve = async (id: string, via: AuditEvent["via"]) => {
-    const inspection = await inspect(stagedDir(project, id), id)
-    if (inspection.problems.length > 0)
-      throw new Error(`refused: ${id} has problems\n${inspection.problems.map((problem) => `- ${problem}`).join("\n")}`)
+  /**
+   * Installs the exact bytes that `hash` was computed from. A refusal leaves
+   * staging and the installed copy untouched.
+   */
+  const approve = async (id: string, hash: string, via: AuditEvent["via"]) => {
+    const shown = await describe(id)
+    if (shown.hash !== hash)
+      throw new Error(`refused: ${id} changed since it was shown (${hash} -> ${shown.hash}); look at it again before approving`)
+    const problems = await checkStaged(id)
+    if (problems.length > 0) throw new Error(refusal(id, problems))
 
-    const promoted = await promote(project, id)
+    const promoted = await promote(project, id, shown.hash)
     await record({
       at: new Date().toISOString(),
       action: "promote",
@@ -166,7 +187,7 @@ export function createKit(deps: KitDeps) {
     remove,
     revert,
     /// Lint plus typecheck, as ext_check reports it. Runs no extension code.
-    check: (id: string) => check(stagedDir(project, id), id),
+    check: checkStaged,
   }
 }
 

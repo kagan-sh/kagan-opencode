@@ -41,9 +41,13 @@ function Extensions() {
   const [cursor, setCursor] = createSignal(0)
 
   const refresh = async () => {
-    const next = (await server().snapshot({}, { location: location() })) as WireSnapshot
-    setSnapshot(next)
-    setCursor((current) => Math.min(current, Math.max(0, items(next).length - 1)))
+    try {
+      const next = (await server().snapshot({}, { location: location() })) as WireSnapshot
+      setSnapshot(next)
+      setCursor((current) => Math.min(current, Math.max(0, items(next).length - 1)))
+    } catch {
+      // A reload tears the RPC down for a moment; the next plugin.updated event retries.
+    }
   }
 
   const selected = () => items(snapshot())[cursor()]
@@ -55,29 +59,44 @@ function Extensions() {
     ctx.ui.dialog.confirm({ title, message, label: { confirm: confirmLabel, cancel: "Cancel" } })
 
   const show = (result: WireReply) => ctx.ui.toast.show({ message: result.message, variant: result.ok ? "success" : "error" })
+  const fail = (error: unknown) =>
+    ctx.ui.toast.show({ message: error instanceof Error ? error.message : String(error), variant: "error" })
 
-  /** A confirm is a window, not a viewer: cap the diff and point at `o` for the rest. */
-  const cap = (text: string) => (text.length > 1500 ? `${text.slice(0, 1500)}\n... (o shows the whole diff)` : text)
-
-  /** What the person agrees to: the diff for a staged copy, the state for an installed one. */
-  const act = async (verb: string, run: (id: string) => Promise<WireReply>) => {
+  /**
+   * What the person agrees to: the whole diff for a staged copy, whose hash is
+   * carried into the approval; the state for an installed one.
+   */
+  const act = async (verb: string, run: (id: string, hash: string) => Promise<WireReply>) => {
     const item = selected()
     if (!item) return
-    const detail =
-      item.kind === "staged"
-        ? cap(((await server().diff({ id: item.id }, { location: location() })) as WireDiff).text)
-        : item.kind === "installed"
-          ? `${item.id} is installed and ${item.status}.${item.error ? `\n\n${item.error}` : ""}`
-          : `${item.id} failed to load.\n\n${item.error}`
-    const ok = await confirm(`${verb} ${item.id}?`, detail, verb)
-    if (!ok) return
-    show(await run(item.id))
+    try {
+      let hash = ""
+      let detail = ""
+      if (item.kind === "staged") {
+        const diff = (await server().diff({ id: item.id }, { location: location() })) as WireDiff
+        detail = diff.text
+        hash = diff.hash
+      } else if (item.kind === "installed") {
+        detail = `${item.id} is installed and ${item.status}.${item.error ? `\n\n${item.error}` : ""}`
+      } else {
+        detail = `${item.id} failed to load.\n\n${item.error}`
+      }
+      const ok = await confirm(`${verb} ${item.id}?`, detail, verb)
+      if (!ok) return
+      show(await run(item.id, hash))
+    } catch (error) {
+      fail(error)
+    }
     await refresh()
   }
 
   const loadDiff = async (id: string) => {
-    const diff = (await server().diff({ id }, { location: location() })) as WireDiff
-    await ctx.ui.dialog.alert({ title: `Extension ${id}`, message: diff.text })
+    try {
+      const diff = (await server().diff({ id }, { location: location() })) as WireDiff
+      await ctx.ui.dialog.alert({ title: `Extension ${id}`, message: diff.text })
+    } catch (error) {
+      fail(error)
+    }
   }
 
   void refresh()
@@ -92,6 +111,8 @@ function Extensions() {
 
   ctx.keymap.layer(() => ({
     mode: "global",
+    // Only while this page is on screen: `a`, `x`, `q` and the arrow keys belong to the prompt otherwise.
+    enabled: () => ctx.ui.router.current().type === "plugin",
     commands: [
       { id: `${page}.up`, bind: "up", run: () => move(-1) },
       { id: `${page}.down`, bind: "down", run: () => move(1) },
@@ -103,7 +124,7 @@ function Extensions() {
         bind: "a",
         title: "Approve and install",
         enabled: staged,
-        run: () => void act("Install", (id) => server().approve({ id }, { location: location() }) as Promise<WireReply>),
+        run: () => void act("Install", (id, hash) => server().approve({ id, hash }, { location: location() }) as Promise<WireReply>),
       },
       {
         id: `${page}.reject`,
@@ -156,14 +177,14 @@ export default Plugin.define({
       const rows = await ctx.client.plugin.list({ location: location() })
       setFailed(rows.data.filter((row) => row.state.status === "failed").length)
     }
-    void count()
-    const stop = ctx.data.on("plugin.updated", () => void count())
+    void count().catch(() => undefined)
+    const stop = ctx.data.on("plugin.updated", () => void count().catch(() => undefined))
 
     // The server part can change files but cannot reload a location; this part can.
     const stopChanges = ctx.client.rpc(Contract).events.on("changed", async (event) => {
       if (event.location && event.location.directory !== location().directory) return
       await ctx.client.location.reload().catch(() => undefined)
-      await count()
+      await count().catch(() => undefined)
     })
 
     const route = ctx.ui.router.register({ name: "extensions", render: () => <Extensions /> })

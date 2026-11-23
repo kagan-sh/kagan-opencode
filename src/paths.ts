@@ -26,13 +26,15 @@ export const historyRoot = (project: string, id: string) => path.join(stagingRoo
 /** On-disk copy of the kit's own skills, so their `path` is real. */
 export const skillsRoot = (project: string) => inProject(project, "ext-kit", "skills")
 
+/** Scratch space for a copy that is being hashed before it is installed. */
+export const temporaryRoot = (project: string) => path.join(stagingRoot(project), ".tmp")
+
 /**
- * Both folders must exist before anything is promoted: opencode watches the
- * plugin folders it saw at startup, so a `plugins` folder created later by the
- * first promote can be missed until a restart.
+ * Only `plugins` is made at setup: opencode watches the plugin folders it saw
+ * at startup, so a folder created later by the first promote can be missed
+ * until a restart. Staging and the skill copy appear on first use.
  */
-export async function ensureFolders(project: string) {
-  await mkdir(stagingRoot(project), { recursive: true })
+export async function ensurePluginsRoot(project: string) {
   await mkdir(pluginsRoot(project), { recursive: true })
 }
 
