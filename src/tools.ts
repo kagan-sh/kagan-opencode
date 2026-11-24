@@ -1,5 +1,6 @@
 import type { PermissionDomain } from "@opencode/plugin/promise/permission"
 import type { Info, ToolContext } from "@opencode/plugin/promise/tool"
+import path from "node:path"
 import { typeFolders } from "./check.ts"
 import type { Kit } from "./kit.ts"
 import { assertId } from "./paths.ts"
@@ -28,26 +29,62 @@ const types = () => {
     : "types: the kit's @opencode/plugin package was not found; read the docs instead"
 }
 
+/** What a promote asks for. opencode 2.3.2 renders a diff only for an `edit` action. */
+export interface ApprovalRequest {
+  readonly action: "edit"
+  readonly resources: readonly string[]
+  readonly save: readonly string[]
+  readonly metadata: Record<string, unknown>
+}
+
+/**
+ * The promote request: an edit of the loaded folder, so the dialog renders the
+ * whole change, plus the hash of exactly those bytes. `save: []` keeps
+ * "always" from covering any later content.
+ */
+export const promotionApproval = (id: string, shown: { readonly hash: string; readonly patch: string }): ApprovalRequest => ({
+  action: "edit",
+  resources: [path.join(".opencode", "plugins", id), `${id}@${shown.hash}`],
+  save: [],
+  metadata: { kit: "promote", diff: shown.patch },
+})
+
 /**
  * A person says yes. The kit cannot enforce it, so this is the only gate there
- * is. `save: []` keeps "always" from covering any later content.
+ * is. A decline gets a message the agent can act on: opencode's own error is
+ * the same for a decline and a failure, which is why the agent used to retry.
  */
-const ask = (
+const ask = async (
   deps: ToolDeps,
   context: ToolContext,
-  action: string,
-  resources: string[],
-  metadata: Record<string, string>,
-) =>
-  deps.permission.assert({
-    sessionID: context.sessionID,
-    agent: context.agent,
-    source: { type: "tool", messageID: context.messageID, id: context.id },
-    action,
-    resources,
-    save: [],
-    metadata,
-  })
+  request: {
+    readonly action: string
+    readonly resources: readonly string[]
+    readonly metadata?: Record<string, unknown>
+  },
+  declined: { readonly verb: string; readonly what: string },
+) => {
+  try {
+    await deps.permission.assert({
+      sessionID: context.sessionID,
+      agent: context.agent,
+      source: { type: "tool", messageID: context.messageID, id: context.id },
+      action: request.action,
+      resources: [...request.resources],
+      save: [],
+      metadata: request.metadata ?? {},
+    })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    const message = `the person declined ${declined.verb}; ${declined.what}. Do not retry, and do not start another one unless they ask. (${reason})`
+    // Keep the rejection object: the host uses a plain rejection to end the step.
+    if (error instanceof Error) {
+      error.message = message
+      throw error
+    }
+    throw new Error(message)
+  }
+}
 
 export function extensionTools(deps: ToolDeps): Info[] {
   const { kit } = deps
@@ -84,7 +121,7 @@ export function extensionTools(deps: ToolDeps): Info[] {
     {
       name: "ext_status",
       description:
-        "Staged and installed extensions, which loaded plugins failed and why, and the last changes made to extensions.",
+        "Staged and installed extensions, which server plugins failed and why, and the last changes made to extensions.",
       input: object({}, []),
       execute: async () => {
         const snapshot = await kit.snapshot()
@@ -102,12 +139,17 @@ export function extensionTools(deps: ToolDeps): Info[] {
     {
       name: "ext_promote",
       description:
-        "Ask the person to approve a staged extension, then install that exact content into .opencode/plugins where it loads at once. The approval shows every file with its size and hash, the contributions it could find, and the whole diff; a change too large to show is refused, not cut.",
+        "Ask the person to approve a staged extension, then install exactly those bytes into .opencode/plugins/<id>. The approval is an edit of that folder, so opencode's dialog shows every file with its size and hash and the whole change; a change too large to show, or a file that is not UTF-8 text, is refused, not cut. A running terminal UI reloads by itself; otherwise restart opencode.",
       input: object({ id: { type: "string" } }, ["id"]),
       execute: async (input, context) => {
         const id = assertId((input as { id: string }).id)
         const shown = await kit.describe(id)
-        await ask(deps, context, "ext.promote", [`${id}@${shown.hash}`], { summary: shown.text })
+        await ask(
+          deps,
+          context,
+          promotionApproval(id, shown),
+          { verb: `to promote ${id}`, what: "nothing was installed" },
+        )
         const promoted = await kit.approve(id, shown.hash, "tool")
         return text(
           [
@@ -123,7 +165,12 @@ export function extensionTools(deps: ToolDeps): Info[] {
       input: object({ id: { type: "string" } }, ["id"]),
       execute: async (input, context) => {
         const id = assertId((input as { id: string }).id)
-        await ask(deps, context, "ext.remove", [id], {})
+        await ask(
+          deps,
+          context,
+          { action: "ext.remove", resources: [id] },
+          { verb: `to remove ${id}`, what: "nothing was removed" },
+        )
         const files = await kit.remove(id, "tool")
         return text(`removed ${id} (${files.length} files). Saved versions are kept for ext_revert if one exists.`)
       },
@@ -134,7 +181,12 @@ export function extensionTools(deps: ToolDeps): Info[] {
       input: object({ id: { type: "string" } }, ["id"]),
       execute: async (input, context) => {
         const id = assertId((input as { id: string }).id)
-        await ask(deps, context, "ext.revert", [id], {})
+        await ask(
+          deps,
+          context,
+          { action: "ext.revert", resources: [id] },
+          { verb: `to revert ${id}`, what: "nothing was changed" },
+        )
         const restored = await kit.revert(id, "tool")
         return text(`reverted ${id} to ${restored.stamp}. Run ext_status to confirm it loaded.`)
       },

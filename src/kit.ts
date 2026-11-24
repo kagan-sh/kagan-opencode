@@ -92,9 +92,10 @@ export function createKit(deps: KitDeps) {
   /**
    * Everything a person needs to decide: what it is, what it touches, what
    * changes, and the hash of those exact bytes. Refuses rather than showing
-   * less than the whole change.
+   * less than the whole change. `patch` is the same change as one unified
+   * diff hunk, the form opencode's permission dialog renders.
    */
-  const describe = async (id: string): Promise<{ readonly text: string; readonly hash: string }> => {
+  const describe = async (id: string): Promise<{ readonly text: string; readonly hash: string; readonly patch: string }> => {
     const inspection = await inspect(stagedDir(project, id), id)
     if (inspection.problems.length > 0) throw new Error(refusal(id, inspection.problems))
 
@@ -130,7 +131,20 @@ export function createKit(deps: KitDeps) {
     }
 
     const text = lines.filter((line, index) => line !== "" || lines[index - 1] !== "").join("\n")
-    return { text, hash }
+
+    // One addition hunk: every staged line, with the file list and the hash as
+    // the first lines. opencode's edit prompt renders this as a scrollable diff.
+    const added = [
+      `+extension ${id}  hash ${hash}`,
+      `+files (${inspection.files.length}):`,
+      ...inspection.files.map((file) => `+  ${file.path}  ${file.bytes} B  sha256 ${file.hash}`),
+      `+contributions (regex hints): ${inspection.contributions.join(", ") || "none detected"}`,
+      `+imports: ${inspection.imports.join(", ") || "none"}`,
+      "+",
+      ...inspection.files.flatMap((file) => [`+${file.path}:`, ...(file.text ?? "").split("\n").map((line) => `+${line}`)]),
+    ]
+    const patch = ["--- /dev/null", `+++ b/.opencode/plugins/${id}`, `@@ -0,0 +1,${added.length} @@`, ...added].join("\n")
+    return { text, hash, patch }
   }
 
   const record = async (event: AuditEvent) => {

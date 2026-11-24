@@ -15,7 +15,8 @@ You can add tools, commands, hooks and terminal UI parts to this opencode by wri
 
 - Load the \`ext-overview\` skill before writing one; \`ext-server\` and \`ext-tui\` have the API, \`ext-safety\` the risks.
 - Write into \`.opencode/staging/<id>\` with \`ext_new\`. Nothing there runs. \`ext_check\` must pass.
-- \`ext_promote\` shows the person every file with its hash and the whole diff, waits for approval, then installs exactly that content. \`ext_remove\` and \`ext_revert\` ask too.
+- \`ext_promote\` asks the person through opencode's permission dialog as an edit of \`.opencode/plugins/<id>\`; the dialog shows every file with its size and hash and the whole change, and approval installs exactly that content. A decline installs nothing: do not retry. The same is true of \`ext_remove\` and \`ext_revert\`.
+- The person can also use \`/extensions\` to read, approve, reject, remove or revert without the agent.
 - Never write into \`.opencode/plugins\` yourself: code there runs at once with the person's full rights.
 - Approval is a convention plus guards, not a sandbox: any local process that can reach opencode's API can approve, and a shell can write anywhere. Say so when you propose an extension.`
 
@@ -27,6 +28,7 @@ export default Plugin.define({
     await ensurePluginsRoot(project)
 
     let notify: ((change: { id: string; action: "promote" | "reject" | "remove" | "revert" }) => Promise<void>) | undefined
+    let warn: ((message: string) => Promise<void>) | undefined
     const kit = createKit({
       project,
       plugins: async () => (await ctx.plugin.list()).data,
@@ -56,12 +58,15 @@ export default Plugin.define({
       event.system.push({ type: "text", text: rule })
     })
 
-    await ctx.permission.hook("evaluate", (event) => guard(project, event))
+    await ctx.permission.hook("evaluate", (event) => guard(project, event, (message) => void warn?.(message)))
 
     const registration = await ctx.rpc.register(Contract, handlers(kit))
 
     notify = async (change) => {
       await registration.events.emit("changed", change)
+    }
+    warn = async (message) => {
+      await registration.events.emit("warned", { message })
     }
   },
 })

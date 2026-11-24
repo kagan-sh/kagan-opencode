@@ -4,7 +4,7 @@ import type { Snapshot } from "./kit.ts"
 /** What the TUI receives. Mirrors `Snapshot`, which the server part returns. */
 export type WireSnapshot = Snapshot
 export type WireReply = { ok: boolean; message: string }
-export type WireDiff = { text: string; hash: string }
+export type WireDiff = { text: string; hash: string; patch: string }
 
 const one = { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false }
 const bound = {
@@ -90,8 +90,8 @@ export const Kit = Rpc.define({
       input: one,
       output: {
         type: "object",
-        properties: { text: { type: "string" }, hash: { type: "string" } },
-        required: ["text", "hash"],
+        properties: { text: { type: "string" }, hash: { type: "string" }, patch: { type: "string" } },
+        required: ["text", "hash", "patch"],
         additionalProperties: false,
       },
     },
@@ -106,6 +106,15 @@ export const Kit = Rpc.define({
         type: "object",
         properties: { id: { type: "string" }, action: { type: "string" } },
         required: ["id", "action"],
+        additionalProperties: false,
+      },
+    },
+    /** The guard's reason, which opencode 2.3.2's permission dialog does not render. */
+    warned: {
+      schema: {
+        type: "object",
+        properties: { message: { type: "string" } },
+        required: ["message"],
         additionalProperties: false,
       },
     },

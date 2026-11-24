@@ -14,12 +14,13 @@ interface Asked {
   action: string
   resources: readonly string[]
   save?: readonly string[]
+  metadata?: Record<string, unknown>
 }
 
 const permission = (asked: Asked[], allow = true): Pick<PermissionDomain, "assert"> =>
   ({
-    assert: async (input: { action: string; resources: readonly string[]; save?: readonly string[] }) => {
-      asked.push({ action: input.action, resources: input.resources, save: input.save })
+    assert: async (input: { action: string; resources: readonly string[]; save?: readonly string[]; metadata?: Record<string, unknown> }) => {
+      asked.push({ action: input.action, resources: input.resources, save: input.save, metadata: input.metadata })
       if (!allow) throw new Error("the person said no")
     },
   }) as unknown as Pick<PermissionDomain, "assert">
@@ -122,6 +123,28 @@ test("the approval lists every file with its size and hash", async () => {
   expect(shown.text).toContain("+")
 })
 
+test("the patch is one addition hunk with every staged line and the hash", async () => {
+  const dir = await project()
+  const { kit } = tools(dir)
+  await scaffold(dir, "hello", "server")
+  await writeFile(path.join(stagedDir(dir, "hello"), "index.ts"), index("hello", "// second line\n"))
+  const { hash, patch } = await kit.describe("hello")
+
+  expect(patch.startsWith("--- /dev/null\n+++ b/.opencode/plugins/hello\n@@ -0,0 +1,")).toBe(true)
+  expect(patch).toContain("+extension hello  hash " + hash)
+  expect(patch).toContain("+  index.ts")
+  expect(patch).toContain('+import { Plugin } from "@opencode/plugin"')
+  expect(patch).toContain("+// second line")
+  expect(patch.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).length).toBe(Number(/@@ -0,0 \+1,(\d+) @@/.exec(patch)![1]))
+})
+
+test("the promote description does not claim an instant load", () => {
+  const dir = "/work/app"
+  const tool = new Map(extensionTools({ kit: createKit({ project: dir, plugins: async () => [], storage: memory() }), project: dir, permission: { assert: async () => undefined } as never }).map((item) => [item.name, item])).get("ext_promote")!
+  expect(tool.description).not.toContain("loads at once")
+  expect(tool.description).toContain("restart opencode")
+})
+
 test("an approval is refused when staging changed after it was shown", async () => {
   const dir = await project()
   const { kit } = tools(dir)
@@ -205,15 +228,22 @@ test("promote copies into plugins and keeps the version it replaced", async () =
   expect(await tools(dir).kit.check("hello")).toEqual([])
 })
 
-test("the person is asked for ext.promote with the content hash, and nothing is copied without a yes", async () => {
+test("the person is asked for a promote as an edit whose dialog carries the whole change", async () => {
   const dir = await project()
   const { call, kit, asked } = tools(dir, false)
   await call("ext_new", { id: "hello", kind: "server" })
   const { hash } = await kit.describe("hello")
 
   const reply = await call("ext_promote", { id: "hello" }).catch((error: Error) => error.message)
-  expect(reply).toContain("the person said no")
-  expect(asked).toEqual([{ action: "ext.promote", resources: [`hello@${hash}`], save: [] }])
+  expect(reply).toContain("the person declined to promote hello")
+  expect(reply).toContain("nothing was installed")
+  expect(asked).toHaveLength(1)
+  expect(asked[0]!.action).toBe("edit")
+  expect(asked[0]!.resources).toEqual([path.join(".opencode", "plugins", "hello"), `hello@${hash}`])
+  expect(asked[0]!.save).toEqual([])
+  expect(asked[0]!.metadata?.kit).toBe("promote")
+  expect(String(asked[0]!.metadata?.diff)).toContain("+extension hello  hash " + hash)
+  expect(String(asked[0]!.metadata?.diff)).toContain('+import { Plugin } from "@opencode/plugin"')
   expect(await readdir(path.join(dir, ".opencode", "plugins")).catch(() => [])).toEqual([])
   expect(await readdir(stagedDir(dir, "hello"))).toContain("index.ts")
 })
@@ -246,7 +276,7 @@ test("ext_remove and ext_revert ask too", async () => {
   await call("ext_revert", { id: "hello" })
   await call("ext_remove", { id: "hello" })
 
-  expect(asked.map((entry) => entry.action)).toEqual(["ext.promote", "ext.promote", "ext.revert", "ext.remove"])
+  expect(asked.map((entry) => entry.action)).toEqual(["edit", "edit", "ext.revert", "ext.remove"])
   expect(asked.slice(-2).map((entry) => entry.resources)).toEqual([["hello"], ["hello"]])
 })
 
