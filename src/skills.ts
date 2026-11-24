@@ -30,9 +30,9 @@ There is no package.json and no install step: opencode finds \`index.ts\` and \`
 1. \`ext_new { id, kind }\` writes \`.opencode/staging/<id>\`. **Nothing in staging ever runs.** It also prints the type folders to read.
 2. Edit the files. Load \`ext-server\` for the server API and \`ext-tui\` for slots, routes and keys.
 3. \`ext_check { id }\`: shape, ids, imports, and a typecheck against the kit's pinned \`@opencode/plugin\` 2.3.2 types. Fix every problem.
-4. \`ext_promote { id }\`: shows the person every file with its size and hash and the whole diff, then installs exactly those bytes into \`.opencode/plugins/<id>\`. Over 12,000 characters of staged text is refused: split the extension.
+4. \`ext_promote { id }\`: asks the person in opencode's permission dialog, as an edit of \`.opencode/plugins/<id>\` so the dialog renders the change. It shows every file with its size and hash and the whole staged content, then installs exactly those bytes. Over 12,000 characters of staged text is refused: split the extension.
 5. \`ext_status\`: which plugins are active or failed, with the error, and what changed recently.
-6. \`ext_remove\` / \`ext_revert\`: take it out, or go back to the version it replaced. Both ask.
+6. \`ext_remove\` / \`ext_revert\`: take it out, or go back to the version it replaced. Both ask. A rejected ask installs or changes nothing; do not retry, and let the person use \`/extensions\` if they want to act themselves.
 
 If \`ext_status\` shows a failed extension, repair it in staging: edit the files, \`ext_check\` until it is clean, then \`ext_promote\` again. A promote replaces the installed copy and keeps the old one for \`ext_revert\`.
 
@@ -87,7 +87,7 @@ export default Plugin.define({
 - Transforms are **synchronous**: read files or the network first, then edit inside the callback.
 - Hooks: \`ctx.tool.hook("execute.before")\`, \`ctx.session.hook("context")\` (edit \`event.system\`), \`ctx.permission.hook("evaluate")\` (set \`event.effect\`), \`ctx.shell.hook("create.before")\`. Return a promise or throw to block.
 - Other transforms: \`agent\`, \`skill\`, \`mcp\`, \`provider\`, \`model\`, \`integration\`. Read side: \`ctx.storage.get/set/scan\`, \`ctx.plugin.list()\`, \`ctx.session.*\`, \`ctx.event.subscribe()\`.
-- Ask a person: \`ctx.permission.assert({ sessionID, action, resources, save: [] })\`. Do not assume a new action asks: on a default config an unknown action is allowed outright, so the kit's own guard turns every \`ext.*\` action into a question. Put the content hash in the resource (\`id@hash\`) so an "always" reply cannot cover new content, and pass \`save: []\` when it must not be saved.
+- Ask a person: \`ctx.permission.assert({ sessionID, action, resources, save: [] })\`. Do not assume a new action asks: on a default config an unknown action is allowed outright, so a guard is needed to turn it into a question. Put the content hash in the resource (\`id@hash\`) so an "always" reply cannot cover new content, and pass \`save: []\` when it must not be saved. opencode 2.3.2's permission dialog renders a diff only for an \`edit\` action (from \`metadata.diff\`), so ask as an edit of the target when the person must see the change.
 - RPC: \`ctx.rpc.register(Definition, handlers)\`; see \`${docs}/rpc\`.
 
 Types, which beat any summary here: the folders \`ext_new\` and \`ext_check\` print, \`dist/promise/*.d.ts\` for the server part and \`dist/tui/*.d.ts\` for the TUI part. They are the kit's own pinned copy (2.3.2), not the host's install. Docs: \`${docs}/server\`.`,
@@ -132,7 +132,7 @@ export default Plugin.define({
 - There is no slot inside the message list, the header or the tab bar.
 - \`ctx.ui.slot(...)\` and \`ctx.ui.router.register(...)\` return unregister functions: return them from \`setup\`.
 - \`ctx.keymap.layer(factory)\` returns nothing; the layer goes away with the plugin or the component that created it.
-- Dialogs: \`ctx.ui.dialog.confirm/alert/prompt/select\` (await them), \`ctx.ui.toast.show\`. State: \`ctx.storage.store/memory\`.
+- Dialogs: \`ctx.ui.dialog.confirm/alert/prompt/select\` (await them), \`ctx.ui.toast.show\`. State: \`ctx.storage.store/memory\`. \`confirm\` starts with its confirm button selected; for a destructive yes/no use \`select\` with Cancel first and \`current: false\`, or Enter will do the damage.
 - Talk to the server part with \`ctx.client.rpc(Definition)\`, never by importing server code.
 - The TUI loads \`tui.tsx\` beside \`index.ts\` automatically. \`solid-js\`, \`@opentui/solid\` and \`@opentui/core\` come from the host; do not bundle them.
 
@@ -148,7 +148,7 @@ Types: the \`dist/tui\` folder \`ext_new\` and \`ext_check\` print (the kit's pi
 The kit's guards, and their limits:
 
 - **Staging is not loading.** opencode only reads \`.opencode/plugins/\`, so staged code cannot run. This part is real.
-- **Promote asks a person.** A tool call prompts for \`ext.promote\`; the TUI asks with a dialog. The approval is bound to a hash of the exact bytes shown, and the kit refuses to install anything that changed since. \`save: []\` means no "always" reply covers a later version. This is a convention: an agent with shell access can still write into \`.opencode/plugins\` itself. A permission hook turns that, a change to the config that loads plugins, and a call to the kit's RPC into a question, but shell inspection is best effort, so it can be missed.
+- **Promote asks a person.** A tool call prompts in opencode's permission dialog, asked as an edit of the target folder so the dialog can render the whole change; it shows the staged files, their hashes and every line. The approval is bound to a hash of the exact bytes shown, and the kit refuses to install anything that changed since. \`save: []\` means no "always" reply covers a later version. This is a convention: an agent with shell access can still write into \`.opencode/plugins\` itself. A permission hook turns that, a change to the config that loads plugins (\`opencode.json(c)\`, \`tui.json\`, \`.opencode/package.json\`), and a call to the kit's RPC into a question, but shell inspection is best effort, so it can be missed.
 - **The approval RPC is reachable by any local process.** \`reject\`, \`remove\`, \`revert\` and \`approve\` are plain HTTP calls on opencode's own API. An agent with a shell, or any other process that can reach the server, can \`curl\` them. The audit then says \`via: rpc\`. The kit cannot tell a person from a program there.
 - **The audit trail** in opencode's storage records who promoted what, from where, with a content hash. It is a record, not a lock.
 - **\`ext_check\` proves shape and types, not behaviour.** It never runs the extension.
