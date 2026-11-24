@@ -30,6 +30,9 @@ export const label = (item: Item) => {
   return `installed  ${item.id} ${item.status}${item.error ? `: ${first(item.error)}` : ""}`
 }
 
+/** The badge counts the server plugins opencode reports; tui.json plugins are on opencode's /plugins page. */
+export const failedLabel = (count: number) => `${count} server plugin${count === 1 ? "" : "s"} failed - /extensions`
+
 /** Every key that acts on a row. */
 export type Verb = "diff" | "approve" | "reject" | "remove" | "revert"
 
@@ -40,4 +43,15 @@ export type Verb = "diff" | "approve" | "reject" | "remove" | "revert"
 export const can = (verb: Verb, item: Item | undefined) => {
   if (verb === "remove" || verb === "revert") return item?.kind === "installed" && (verb === "revert" ? item.revertable : true)
   return item?.kind === "staged"
+}
+
+/** Why a key did nothing, so a person pressing it gets an answer instead of silence. */
+export const why = (verb: Verb, item: Item | undefined) => {
+  if (can(verb, item)) return ""
+  if (!item) return "Nothing is selected."
+
+  if (verb === "revert" && item.kind === "installed") return `${item.id} has no saved version to go back to.`
+  if (verb === "diff") return `${item.id} is ${item.kind}; only a staged copy can be read.`
+  if (verb === "approve" || verb === "reject") return `${item.id} is ${item.kind}; only a staged copy can be approved or rejected.`
+  return `${item.id} is ${item.kind}; only an installed extension can be ${verb === "revert" ? "reverted" : "removed"}.`
 }

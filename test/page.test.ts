@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { can, items, label } from "../src/page.ts"
+import { can, failedLabel, items, label, why } from "../src/page.ts"
 import type { WireSnapshot } from "../src/rpc.ts"
 
 const snapshot: WireSnapshot = {
@@ -45,4 +45,23 @@ test("reject needs a staged row; remove and revert need an installed one", () =>
   expect(can("remove", row("staged", "draft"))).toBe(false)
   expect(can("revert", row("installed", "old"))).toBe(false)
   expect(can("revert", row("installed", "hello"))).toBe(true)
+})
+
+test("the badge says it counts server plugins, not tui.json ones", () => {
+  expect(failedLabel(1)).toBe("1 server plugin failed - /extensions")
+  expect(failedLabel(2)).toBe("2 server plugins failed - /extensions")
+})
+
+test("a key that does nothing says why", () => {
+  for (const verb of ["diff", "approve", "reject", "remove", "revert"] as const) {
+    for (const item of items(snapshot)) {
+      const message = why(verb, item)
+      if (can(verb, item)) expect(message, `${verb} ${item.id}`).toBe("")
+      else expect(message.length, `${verb} ${item.id}`).toBeGreaterThan(0)
+    }
+  }
+  expect(why("diff", row("installed", "hello"))).toContain("only a staged copy")
+  expect(why("revert", row("installed", "old"))).toContain("no saved version")
+  expect(why("remove", row("staged", "draft"))).toContain("only an installed extension")
+  expect(why("diff", undefined)).toBe("Nothing is selected.")
 })

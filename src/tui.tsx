@@ -1,6 +1,6 @@
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { For, Show, createSignal, onCleanup } from "solid-js"
-import { can, items, label, type Verb } from "./page.ts"
+import { can, failedLabel, items, label, why, type Verb } from "./page.ts"
 import { Kit as Contract, type WireDiff, type WireReply, type WireSnapshot } from "./rpc.ts"
 
 const page = "kagan.ext.page"
@@ -12,7 +12,7 @@ interface Review {
   readonly install?: () => Promise<WireReply>
 }
 
-function Extensions() {
+function Extensions(props: { readonly close: () => void }) {
   const ctx = usePlugin()
   const location = () => ctx.location ?? ctx.data.location.default()
   const server = () => ctx.client.rpc(Contract)
@@ -35,12 +35,23 @@ function Extensions() {
     setCursor((current) => Math.min(Math.max(0, current + by), Math.max(0, items(snapshot()).length - 1)))
   }
 
-  const confirm = (title: string, message: string, confirmLabel: string) =>
-    ctx.ui.dialog.confirm({ title, message, label: { confirm: confirmLabel, cancel: "Cancel" } })
+  /** A two-row dialog with Cancel as the current row: Enter never removes or rejects by accident. */
+  const confirm = async (title: string, message: string, confirmLabel: string) => {
+    const choice = await ctx.ui.dialog.select({
+      title,
+      options: [
+        { title: "Cancel", value: false, description: message },
+        { title: confirmLabel, value: true, description: message },
+      ],
+      current: false,
+    })
+    return choice === true
+  }
 
   const show = (result: WireReply) => ctx.ui.toast.show({ message: result.message, variant: result.ok ? "success" : "error" })
   const fail = (error: unknown) =>
     ctx.ui.toast.show({ message: error instanceof Error ? error.message : String(error), variant: "error" })
+  const note = (verb: Verb) => ctx.ui.toast.show({ message: why(verb, selected()), variant: "info" })
 
   /**
    * A staged copy is read in full, in a view that scrolls, before anyone can
@@ -111,36 +122,57 @@ function Extensions() {
       { id: `${page}.down`, bind: "down", enabled: listing, run: () => move(1) },
       { id: `${page}.up.k`, bind: "k", enabled: listing, run: () => move(-1) },
       { id: `${page}.down.j`, bind: "j", enabled: listing, run: () => move(1) },
-      { id: `${page}.diff`, bind: "o", title: "Show the diff", enabled: () => acts("diff"), run: () => void read(selected()!.id) },
+      {
+        id: `${page}.diff`,
+        bind: "o",
+        title: "Show the diff",
+        enabled: listing,
+        run: () => {
+          if (!acts("diff")) return note("diff")
+          void read(selected()!.id)
+        },
+      },
       {
         id: `${page}.approve`,
         bind: "a",
         title: "Approve and install",
-        enabled: () => acts("approve"),
-        run: () => void act("Install", (id, hash) => server().approve({ id, hash }, { location: location() }) as Promise<WireReply>),
+        enabled: listing,
+        run: () => {
+          if (!acts("approve")) return note("approve")
+          void act("Install", (id, hash) => server().approve({ id, hash }, { location: location() }) as Promise<WireReply>)
+        },
       },
       {
         id: `${page}.reject`,
         bind: "x",
         title: "Reject and delete the staged copy",
-        enabled: () => acts("reject"),
-        run: () => void act("Reject", (id) => server().reject({ id }, { location: location() }) as Promise<WireReply>),
+        enabled: listing,
+        run: () => {
+          if (!acts("reject")) return note("reject")
+          void act("Reject", (id) => server().reject({ id }, { location: location() }) as Promise<WireReply>)
+        },
       },
       {
         id: `${page}.remove`,
         bind: "d",
         title: "Remove the installed extension",
-        enabled: () => acts("remove"),
-        run: () => void act("Remove", (id) => server().remove({ id }, { location: location() }) as Promise<WireReply>),
+        enabled: listing,
+        run: () => {
+          if (!acts("remove")) return note("remove")
+          void act("Remove", (id) => server().remove({ id }, { location: location() }) as Promise<WireReply>)
+        },
       },
       {
         id: `${page}.revert`,
         bind: "v",
         title: "Go back to the saved version",
-        enabled: () => acts("revert"),
-        run: () => void act("Revert", (id) => server().revert({ id }, { location: location() }) as Promise<WireReply>),
+        enabled: listing,
+        run: () => {
+          if (!acts("revert")) return note("revert")
+          void act("Revert", (id) => server().revert({ id }, { location: location() }) as Promise<WireReply>)
+        },
       },
-      { id: `${page}.close`, bind: "q", title: "Close extensions", enabled: listing, run: () => ctx.ui.router.navigate({ type: "home" }) },
+      { id: `${page}.close`, bind: "q", title: "Close extensions", enabled: listing, run: () => props.close() },
       {
         id: `${page}.install`,
         bind: "return",
@@ -166,6 +198,7 @@ function Extensions() {
             <text> </text>
             <text>a approve  x reject  d remove  v revert  o diff  q close</text>
             <text>staged code does not run. installed code runs with your full rights.</text>
+            <text>tui.json plugins load in the terminal UI; opencode's /plugins page lists them.</text>
           </Show>
         </box>
       }
@@ -188,6 +221,8 @@ export default Plugin.define({
   setup(ctx) {
     const location = () => ctx.location ?? ctx.data.location.default()
     const [failed, setFailed] = createSignal(0)
+    // Where the person was before /extensions, so q returns there instead of home.
+    const [origin, setOrigin] = createSignal<{ type: "home" } | { type: "session"; sessionID: string }>({ type: "home" })
 
     const count = async () => {
       const rows = await ctx.client.plugin.list({ location: location() })
@@ -203,12 +238,19 @@ export default Plugin.define({
       await count().catch(() => undefined)
     })
 
-    const route = ctx.ui.router.register({ name: "extensions", render: () => <Extensions /> })
+    // The guard's reason, which opencode's permission dialog does not render.
+    const stopWarnings = ctx.client.rpc(Contract).events.on("warned", (event) => {
+      const message = event.data.message
+      if (typeof message === "string") ctx.ui.toast.show({ message, variant: "warning", title: "Kit guard" })
+    })
+
+    const close = () => ctx.ui.router.navigate(origin())
+    const route = ctx.ui.router.register({ name: "extensions", render: () => <Extensions close={close} /> })
     const slot = ctx.ui.slot({
       append: "sidebar.footer",
       render: () => (
         <Show when={failed() > 0}>
-          <text fg="red">{`${failed()} extension${failed() === 1 ? "" : "s"} failed - /extensions`}</text>
+          <text fg="red">{failedLabel(failed())}</text>
         </Show>
       ),
     })
@@ -223,7 +265,11 @@ export default Plugin.define({
           bind: "ctrl+shift+e",
           palette: true,
           slash: { name: "extensions" },
-          run: () => ctx.ui.router.navigate({ type: "plugin", name: "extensions" }),
+          run: () => {
+            const here = ctx.ui.router.current()
+            if (here.type !== "plugin") setOrigin(here.type === "session" ? { type: "session", sessionID: here.sessionID } : { type: "home" })
+            ctx.ui.router.navigate({ type: "plugin", name: "extensions" })
+          },
         },
       ],
     }))
@@ -231,6 +277,7 @@ export default Plugin.define({
     return () => {
       stop()
       stopChanges()
+      stopWarnings()
       route()
       slot()
     }
