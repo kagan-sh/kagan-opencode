@@ -76,7 +76,11 @@ const ask = async (
     })
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    const message = `the person declined ${declined.verb}; ${declined.what}. Do not retry, and do not start another one unless they ask. (${reason})`
+    // A deny rule is not a person's decision; the host says so in the message.
+    const lead = /permission denied|permission .*needs approval|blocked/i.test(reason)
+      ? `a permission rule denied ${declined.verb}`
+      : `the person declined to ${declined.verb}`
+    const message = `${lead}; ${declined.what}. Do not retry, and do not start another one unless they ask. (${reason})`
     // Keep the rejection object: the host uses a plain rejection to end the step.
     if (error instanceof Error) {
       error.message = message
@@ -148,7 +152,7 @@ export function extensionTools(deps: ToolDeps): Info[] {
           deps,
           context,
           promotionApproval(id, shown),
-          { verb: `to promote ${id}`, what: "nothing was installed" },
+          { verb: `promote ${id}`, what: "nothing was installed" },
         )
         const promoted = await kit.approve(id, shown.hash, "tool")
         return text(
@@ -169,7 +173,7 @@ export function extensionTools(deps: ToolDeps): Info[] {
           deps,
           context,
           { action: "ext.remove", resources: [id] },
-          { verb: `to remove ${id}`, what: "nothing was removed" },
+          { verb: `remove ${id}`, what: "nothing was removed" },
         )
         const files = await kit.remove(id, "tool")
         return text(`removed ${id} (${files.length} files). Saved versions are kept for ext_revert if one exists.`)
@@ -185,7 +189,7 @@ export function extensionTools(deps: ToolDeps): Info[] {
           deps,
           context,
           { action: "ext.revert", resources: [id] },
-          { verb: `to revert ${id}`, what: "nothing was changed" },
+          { verb: `revert ${id}`, what: "nothing was changed" },
         )
         const restored = await kit.revert(id, "tool")
         return text(`reverted ${id} to ${restored.stamp}. Run ext_status to confirm it loaded.`)

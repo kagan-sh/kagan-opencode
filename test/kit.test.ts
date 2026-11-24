@@ -248,8 +248,24 @@ test("the person is asked for a promote as an edit whose dialog carries the whol
   expect(await readdir(stagedDir(dir, "hello"))).toContain("index.ts")
 })
 
-test("an edit while the person decides is refused, and the edited content never installs", async () => {
+test("a deny rule is reported as a rule, not as the person declining", async () => {
   const dir = await project()
+  const kit = createKit({ project: dir, plugins: async () => [], storage: memory() })
+  const permission = {
+    assert: async () => {
+      throw new Error("Permission denied: edit")
+    },
+  } as unknown as Pick<PermissionDomain, "assert">
+  const promote = new Map(extensionTools({ kit, project: dir, permission }).map((tool) => [tool.name, tool])).get("ext_promote")!
+  await scaffold(dir, "hello", "server")
+
+  const message = await promote.execute({ id: "hello" }, context()).catch((error: Error) => error.message)
+  expect(message).toContain("a permission rule denied promote hello")
+  expect(message).toContain("nothing was installed")
+  expect(await readdir(path.join(dir, ".opencode", "plugins")).catch(() => [])).toEqual([])
+})
+
+test("an edit while the person decides is refused, and the edited content never installs", async () => {  const dir = await project()
   const kit = createKit({ project: dir, plugins: async () => [], storage: memory() })
   const file = path.join(stagedDir(dir, "hello"), "index.ts")
   // The fake ask edits staging, as another process could while the dialog is open.
