@@ -6,17 +6,21 @@
  * What it proves: the kit loads in a real opencode server; a staged extension
  * passes ext_check; the approval RPC installs the exact hashed content; a
  * changed hash is refused; opencode loads both a server and a TUI extension; a
- * failing extension shows up in ctx.plugin.list with its error; the real
- * permission path asks and a real rejection installs nothing; the page rejects
- * a staged copy from the keyboard; the audit trail reads back after the
- * reloads; ext_status reports both.
+ * failing extension shows up in ctx.plugin.list with its error; the promote ask
+ * is an edit carrying the whole change, the guard asks, and a real rejection
+ * installs nothing; the page rejects a staged copy from the keyboard and only
+ * after a deliberate move; `q` returns to the session; the audit trail reads
+ * back after the reloads; ext_status reports both.
  *
  * What it cannot prove: the agent side of the loop needs a model, so the agent
  * tools are called directly here instead of through a session; the tools run
  * with their own storage, so the RPC's audit events reach the host's trail (read
  * here) and the tools' own reach ext_status. The permission step drives the
  * same server endpoint `ctx.permission.assert` uses; the wrapper itself is the
- * host's.
+ * host's. The tmux TUI starts its own in-process server, so an RPC event from
+ * the `serve` process this script drives never reaches it: the guard's toast is
+ * wired the same way as the page's reload, and only a session whose agent and
+ * TUI share one process can show it.
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { spawn } from "node:child_process"
@@ -25,7 +29,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { createKit, type PluginRow } from "../src/kit.ts"
 import { installedDir, stagedDir } from "../src/paths.ts"
-import { extensionTools } from "../src/tools.ts"
+import { extensionTools, promotionApproval } from "../src/tools.ts"
 
 const kitPath = path.resolve(import.meta.dir, "..")
 const keep = process.env.KEEP === "1"
@@ -135,12 +139,13 @@ const server = (base: string) => {
       return body.output
     },
     /** Exactly what `ctx.permission.assert` posts, over the same endpoint. */
-    permission: async (sessionID: string, action: string, resources: string[]) =>
+    permission: async (sessionID: string, input: { action: string; resources: readonly string[]; save?: readonly string[]; metadata?: Record<string, unknown> }) =>
       (
         await request<{ data: { id: string; effect: string } }>("POST", `${base}/api/session/${sessionID}/permission`, {
-          action,
-          resources,
-          save: [],
+          action: input.action,
+          resources: [...input.resources],
+          save: [...(input.save ?? [])],
+          ...(input.metadata ? { metadata: input.metadata } : {}),
         })
       ).data,
     permissionList: async (sessionID: string) =>
@@ -305,14 +310,18 @@ check(status.includes("sad (installed)") && status.includes("hello (installed)")
 step("the real permission path asks, and a real rejection installs nothing")
 const sessionID = await server(base).session(project)
 await call("ext_new", { id: "asked", kind: "server" })
-const askedHash = ((await server(base).rpc(project, "kagan.ext", "diff", { id: "asked" })) as { hash: string }).hash
-const evaluated = await server(base).permission(sessionID, "ext.promote", [`asked@${askedHash}`])
-say(`permission effect for ext.promote under a default config: ${evaluated.effect}`)
-check(evaluated.effect === "ask", "the guard did not turn ext.promote into a question")
+const askedDiff = (await server(base).rpc(project, "kagan.ext", "diff", { id: "asked" })) as { text: string; hash: string; patch: string }
+const approval = promotionApproval("asked", askedDiff)
+say(`the promote ask is ${approval.action} of ${approval.resources.join(", ")}; the dialog text is ${String(approval.metadata.diff).split("\n").length} lines`)
+check(approval.action === "edit" && String(approval.metadata.diff).includes("+extension asked  hash " + askedDiff.hash), "the promote ask does not carry the whole change")
+const evaluated = await server(base).permission(sessionID, approval)
+say(`permission effect for the promote ask under a default config: ${evaluated.effect}`)
+check(evaluated.effect === "ask", "the guard did not turn the promote ask into a question")
 const pending = await server(base).permissionList(sessionID)
-const request = pending.find((item) => item.action === "ext.promote")
+const request = pending.find((item) => item.action === "edit")
 check(!!request, "no permission request was created")
 say(`asked for ${request!.action} on ${request!.resources.join(", ")}`)
+check(request!.resources.includes(`asked@${askedDiff.hash}`), "the ask does not carry id@hash")
 await server(base).permissionReply(sessionID, request!.id, "reject", "not this one")
 check((await server(base).permissionList(sessionID)).every((item) => item.id !== request!.id), "the rejected request is still pending")
 check(!(await readdir(path.join(project, ".opencode", "plugins"))).includes("asked"), "a rejected permission still installed the extension")
@@ -351,6 +360,7 @@ const refusing = agent(project, () => server(base).plugins(project), false)
 await refusing.call("ext_new", { id: "denied", kind: "server" })
 const refused = await refusing.call("ext_promote", { id: "denied" }).catch((error: Error) => error.message)
 say(`refused promo -> ${refused.split("\n")[0]}`)
+check(refused.includes("declined to promote denied"), "a declined promote does not tell the agent it was declined")
 check(!(await readdir(path.join(project, ".opencode", "plugins"))).includes("denied"), "a refused promote still installed the extension")
 check(refusing.asked.length === 1, "the agent's promote did not ask")
 
@@ -375,9 +385,10 @@ say("- staging stayed invisible to the loader")
 say("- the approval RPC installed the exact hash it showed, and a hash from before an edit was refused")
 say("- a promoted TUI extension loaded with features.tui")
 say("- a throwing extension was reported failed with its error, and ext_status carried it to the agent")
-say(`- a real permission evaluation for ext.promote asked (effect) and a real reject left nothing installed`)
+say(`- a real permission evaluation for the promote ask as an edit asked (effect) and a real reject left nothing installed`)
 say("- the /extensions page rendered in a real terminal, listed the failed extension, and gave the keys back to the prompt")
-say("- x on a staged row asked, then deleted the staged copy in a real terminal")
+say("- x on a staged row asked, Enter cancelled, and a deliberate Down + Enter deleted the staged copy")
+say("- q returned to the session, not the home screen")
 say("- the host's snapshot carried the audit trail (RPC promote, reject) after the reloads; ext_status carried the tool promote")
 say(`- the agent's own ext_promote asked first ("${asked.join("; ")}") and a refusal left nothing installed`)
 
@@ -386,9 +397,11 @@ if (keep) say(`\nkept ${root}`)
 else await rm(root, { recursive: true, force: true })
 
 /**
- * The cheapest proof the TUI page works: a real terminal, no model. Opens
- * `/extensions`, shows the failed extension, closes with `q`, then types into
- * the prompt to show the page's keys did not eat the letters.
+ * The cheapest proof the TUI page works: a real terminal, no model. Opens the
+ * e2e session, opens `/extensions`, shows the failed extension, cancels a
+ * reject with Enter, rejects with Down + Enter, closes with `q` back to the
+ * session, then types into the prompt to show the page's keys did not eat the
+ * letters.
  */
 async function proofOfPage(input: { project: string; env: Record<string, string | undefined> }) {
   const has = await Bun.spawn(["tmux", "-V"], { stdout: "ignore", stderr: "ignore" }).exited
@@ -416,6 +429,18 @@ async function proofOfPage(input: { project: string; env: Record<string, string 
 
   try {
     await Bun.sleep(12_000)
+    // Open the session the e2e made, so `q` has a place to return to (bug 5).
+    await run("send-keys", "-t", name, "-l", "/sessions")
+    await Bun.sleep(1_500)
+    await run("send-keys", "-t", name, "Enter")
+    await Bun.sleep(2_500)
+    const sessions = await capture()
+    check(sessions.includes("e2e permissions"), "the session list does not show the e2e session:\n" + sessions)
+    await run("send-keys", "-t", name, "Enter")
+    await Bun.sleep(3_000)
+    const inside = await capture()
+    check(!inside.includes("█▀▀█"), "the session did not open:\n" + inside)
+
     // Text and Enter must be separate keystrokes: the completion needs a beat to open before Enter dispatches it.
     await run("send-keys", "-t", name, "-l", "/extensions")
     await Bun.sleep(1_500)
@@ -426,22 +451,34 @@ async function proofOfPage(input: { project: string; env: Record<string, string 
     check(/sad failed:/.test(page), "the /extensions page does not show the failed extension:\n" + page)
     check(page.includes("installed  hello active"), "the /extensions page does not show the loaded extension:\n" + page)
 
-    // `x` on the staged `drift` row must ask, then delete it: it must not open the read-only diff.
+    // `x` on the staged `drift` row must ask; Enter must cancel (bug 7), not reject.
     await run("send-keys", "-t", name, "j")
     await Bun.sleep(500)
     await run("send-keys", "-t", name, "x")
     await Bun.sleep(1_500)
     const ask = await capture()
     check(/Reject drift\?/.test(ask), "x did not ask to reject the staged copy:\n" + ask)
+    check(ask.includes("Cancel"), "the confirm does not offer Cancel:\n" + ask)
+    await run("send-keys", "-t", name, "Enter")
+    await Bun.sleep(2_000)
+    check((await readdir(stagedDir(input.project, "drift")).catch(() => [])).length === 1, "Enter on the confirm rejected instead of cancelling")
+
+    // `x` again, then Down to Reject and Enter: the destructive choice takes a deliberate move.
+    await run("send-keys", "-t", name, "x")
+    await Bun.sleep(1_500)
+    await run("send-keys", "-t", name, "Down")
+    await Bun.sleep(500)
     await run("send-keys", "-t", name, "Enter")
     await Bun.sleep(3_000)
     const after = await capture()
     check(!(await readdir(stagedDir(input.project, "drift")).catch(() => [])).length, "x only opened a view; the staged copy is still there")
     check(/^staged\s+asked/m.test(after) && !/^staged\s+drift\b/m.test(after), "the page did not return to the list without the rejected row:\n" + after)
 
-    // `q` closes the page; every letter after it must reach the prompt.
+    // `q` closes the page and returns to the session, not home (bug 5); every letter after it must reach the prompt.
     await run("send-keys", "-t", name, "q")
     await Bun.sleep(1_500)
+    const closed = await capture()
+    check(!closed.includes("█▀▀█"), "q went to the home screen instead of back to the session:\n" + closed)
     await run("send-keys", "-t", name, "-l", "jkaq")
     await Bun.sleep(1_500)
     const prompt = await capture()
